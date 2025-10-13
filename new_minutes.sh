@@ -40,20 +40,24 @@ echo "フォルダを作成します: ${FULL_PATH}"
 mkdir -p "$FULL_PATH"
 
 
-# ★★★ ここからが変更・追加部分 ★★★
-
 # 6. 絶対パスを取得してクリップボードにコピー
-# readlink -f で絶対パスに変換 (macOSの場合はbrew install coreutilsでgreadlinkが必要な場合あり)
-# もしreadlinkコマンドがなければ、単純に echo "$FULL_PATH" としても良い
 ABS_PATH=$(readlink -f "$FULL_PATH")
+COPIED_PATH=$ABS_PATH # 表示用にコピーしておく
 
 COPY_SUCCESS=false
 if command -v pbcopy &> /dev/null; then # macOS
   echo -n "$ABS_PATH" | pbcopy
   COPY_SUCCESS=true
-elif command -v clip.exe &> /dev/null; then # Windows (WSL)
-  echo -n "$ABS_PATH" | clip.exe
+
+# ★★★ ここを修正しました ★★★
+elif command -v clip.exe &> /dev/null; then # Windows (WSL / Git Bash)
+  # Git Bash用のパスをWindows形式 (C:\...) に変換
+  WIN_PATH=$(cygpath -w "$ABS_PATH")
+  echo -n "$WIN_PATH" | clip.exe
+  COPIED_PATH=$WIN_PATH # 表示用パスをWindows形式で上書き
   COPY_SUCCESS=true
+# ★★★ 修正はここまで ★★★
+
 elif command -v xclip &> /dev/null; then # Linux (X11)
   echo -n "$ABS_PATH" | xclip -selection clipboard
   COPY_SUCCESS=true
@@ -63,12 +67,10 @@ elif command -v wl-copy &> /dev/null; then # Linux (Wayland)
 fi
 
 if $COPY_SUCCESS; then
-  echo "📋 フォルダパスをクリップボードにコピーしました: ${ABS_PATH}"
+  echo "📋 フォルダパスをクリップボードにコピーしました: ${COPIED_PATH}"
 else
   echo "⚠️ クリップボードコマンドが見つかりませんでした。"
 fi
-
-# ★★★ ここまでが変更・追加部分 ★★★
 
 
 # 7. 議事録ファイルを作成
