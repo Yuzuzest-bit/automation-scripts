@@ -21,6 +21,7 @@ BEGIN{
   closedDone=0
   doneReplaced=0
 }
+NR==1 { sub(/^\357\273\277/, "") }
 { sub(/\r$/, "") }
 NR==1 {
   if ($0=="---") {
