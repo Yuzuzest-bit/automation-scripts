@@ -21,6 +21,7 @@ BEGIN{
   closedDone=0
   doneReplaced=0
 }
+{ sub(/\r$/, "") }
 NR==1 {
   if ($0=="---") {
     inFM=1
