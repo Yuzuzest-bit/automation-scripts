@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # note_rollup.sh (Windows Git Bash対応)
 # 小タスク（@〜）を集計してRollup行を更新/挿入
+# 変更点: @done* 行は next_due 算出から除外
 
 set -eu
 FILE="${1:-}"
@@ -33,20 +34,31 @@ while IFS= read -r line; do
 
   # 行頭@をチェック
   if [ $inFM -eq 0 ] && [[ "$line" == @* ]]; then
-    tag="${line%% *}"          # 例: @progress
-    tag="${tag#@}"             # progress
-    tag="${tag,,}"             # 小文字化
+    tag="${line%% *}"      # 例: @progress / @done:2025-...
+    tag="${tag#@}"         # progress / done:2025-...
+    tag="${tag,,}"         # 小文字化
 
+    # 既知タグのみカウント（@done はここで無視される）
     if [[ -n "${counts[$tag]+x}" ]]; then
       counts[$tag]=$((counts[$tag]+1))
     fi
 
-    # due日付を抽出
+    # --- ここが今回のポイント ---
+    # @done* の行は next_due の候補から除外
+    if [[ "$line" == @done* ]]; then
+      continue
+    fi
+    # ----------------------------
+
+    # due日付を抽出（@done 以外のみ）
     if [[ "$line" == *"due:"* ]]; then
       after="${line#*due:}"
       cand="${after:0:10}"
-      if [[ "$cand" < "$earliest_due" ]]; then
-        earliest_due="$cand"
+      # YYYY-MM-DD 形式っぽいときだけ比較
+      if [[ "$cand" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        if [[ "$cand" < "$earliest_due" ]]; then
+          earliest_due="$cand"
+        fi
       fi
     fi
   fi
@@ -83,7 +95,7 @@ while IFS= read -r line; do
     continue
   fi
 
-  # 既存Rollup行を置き換え
+  # 既存Rollup行を置き換え（常に最新で上書き）
   if [ $inFM -eq 0 ] && [[ "$line" == "Rollup:"* ]]; then
     continue
   fi
@@ -104,4 +116,4 @@ while IFS= read -r line; do
 done < "$FILE"
 
 mv "$TMP" "$FILE"
-echo "[OK] Rollup updated -> $FILE"
+echo "[OK] Rollup updated (next_due excludes @done) -> $FILE"
