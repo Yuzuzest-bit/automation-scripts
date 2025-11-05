@@ -21,6 +21,12 @@ else
   ROOT="$(cd "$(dirname "$PARENT")" && pwd -P)"
 fi
 
+[ "${VERBOSE:-}" = "1" ] && {
+  echo "== DEBUG =="
+  echo "PARENT: $PARENT"
+  echo "ROOT:   $ROOT"
+}
+
 # A) 親のローカル未完 @行（@done除外）
 mapfile -t LOCAL_TASKS < <(awk '
   BEGIN{inFM=0}
@@ -29,16 +35,16 @@ mapfile -t LOCAL_TASKS < <(awk '
   inFM==0 && $0 ~ /^[[:space:]]*@/ && $0 !~ /^[[:space:]]*@done/ { print $0 }
 ' "$PARENT")
 local_open=${#LOCAL_TASKS[@]}
+[ "${VERBOSE:-}" = "1" ] && echo "local_open: $local_open"
 
-# B1) Children 行の open= を直接読む（ロールアップが最新なら最速）
+# B1) Children 行の open= を直接読む
 children_open_from_line=0
 awk '
   BEGIN{inFM=0}
   { sub(/\r$/,"",$0) }
   $0=="---"{inFM=1-inFM; next}
   inFM==0 && $0 ~ /^Children:[[:space:]]*open=/ {
-    s=$0
-    sub(/^Children:[[:space:]]*open=/,"",s)
+    s=$0; sub(/^Children:[[:space:]]*open=/,"",s)
     n=""
     for (i=1;i<=length(s);i++){ c=substr(s,i,1); if (c ~ /[0-9]/) n=n c; else break }
     if (n!="") print n
@@ -46,60 +52,88 @@ awk '
   }
 ' "$PARENT" | read -r n || true
 if [ -n "${n:-}" ]; then children_open_from_line="$n"; fi
+[ "${VERBOSE:-}" = "1" ] && echo "children_open_from_line: $children_open_from_line"
 
-# --- ここから統合パッチ（埋め込み/添付除外 & 正規化） ---
-
-# [[...]] と ![[...]] を抽出して種別付きで出す（"LINK<TAB>inner" or "EMBED<TAB>inner"）
+# B2) 本文の wikilink を走査（Front Matter外・コードフェンス外のみ）
+#     ![[...]] は EMBED で除外、[[...]] のみ LINK として扱う。行番号も残す。
 mapfile -t LINKS_RAW < <(awk '
-  { sub(/\r$/,"",$0); s=$0 }
+  BEGIN{inFM=0; inFence=0}
+  { raw=$0; sub(/\r$/,"",raw); line=raw }
+  NR==1 { sub(/^\xEF\xBB\xBF/,"",line) }
+
+  # Front Matter トグル
+  line=="---" { inFM=1-inFM; next }
+
+  # FM内はスキップ
+  inFM==1 { next }
+
+  # コードフェンス（``` または ~~~）の開始/終了
+  if (match(line,/^(```|~~~)/)) { inFence = 1-inFence; next }
+  if (inFence==1) { next }
+
+  # 本文のみで [[...]] / ![[...]] を抽出（行番号付き）
   {
+    s=line
     while (match(s, /!?(\[\[[^]]+\]\])/)) {
       token=substr(s,RSTART,RLENGTH)          # [[note]] or ![[img.png]]
-      body=token
-      sub(/^!\[\[/,"[[",body)                 # ![[...]] -> [[...]] に揃える
+      body=token; sub(/^!\[\[/,"[[",body)
       inner=substr(body,3,length(body)-4)     # [[...]] の ... 部分
-      printf("%s\t%s\n", token ~ /^!\[\[/ ? "EMBED":"LINK", inner)
+      kind=(token ~ /^!\[\[/ ? "EMBED":"LINK")
+      printf("%s\t%s\t%s\n", kind, inner, NR) # KIND<TAB>INNER<TAB>LINENO
       s=substr(s,RSTART+RLENGTH)
     }
   }
 ' "$PARENT")
 
-# 子パス解決（.md/.markdown だけ対象）
+[ "${VERBOSE:-}" = "1" ] && {
+  echo "LINKS_RAW count: ${#LINKS_RAW[@]}"
+  for e in "${LINKS_RAW[@]:-}"; do
+    IFS=$'\t' read -r k inner ln <<<"$e"
+    echo "  token: kind=$k line=$ln inner=[[${inner}]]"
+  done
+}
+
 resolve_child() {
   local spec="$1"
 
-  # [[ID|別名]] → 左側 / 末尾空白除去
+  # [[ID|別名]] → 左側、末尾空白除去
   spec="${spec%%|*}"
   spec="${spec%%[[:space:]]*}"
 
-  # [[Note#heading]] / [[Note^block]] → 本体名に
+  # [[#heading]] / [[^block]]：本体空ならスキップ
+  if [[ "$spec" == \#* || "$spec" == \^* || -z "$spec" ]]; then
+    echo "__SKIP__"
+    return
+  fi
+
+  # [[Note#heading]] / [[Note^block]] → 本体
   spec="${spec%%#*}"
   spec="${spec%%^*}"
 
   # 拡張子判定
   local lower ext
-  lower="$(printf '%s' "$spec" | tr 'A-Z' 'a-z')"
+  lower="$(printf '%s' "$spec" | tr "A-Z" "a-z")"
   ext="${lower##*.}"
 
-  # 拡張子があって md/markdown 以外なら「添付」扱い（子ノート候補から除外）
+  # 拡張子あり、かつ md/markdown 以外は添付 → 除外
   if [[ "$spec" == *.* ]] && [[ "$ext" != "md" && "$ext" != "markdown" ]]; then
     echo "__ATTACH__"
     return
   fi
 
-  # 1) 拡張子付き（.md/.markdown）: 相対（親）→ ルート で解決
+  # 1) 拡張子付き（.md/.markdown）: 相対→ROOT
   if [[ "$ext" == "md" || "$ext" == "markdown" ]]; then
     local p1="$(dirname "$PARENT")/$spec"
     local p2="$ROOT/$spec"
     [ -f "$p1" ] && { echo "$(cd "$(dirname "$p1")" && pwd -P)/$(basename "$p1")"; return; }
     [ -f "$p2" ] && { echo "$(cd "$(dirname "$p2")" && pwd -P)/$(basename "$p2")"; return; }
   else
-    # 2) 拡張子なし: name.md / name.markdown を順に試す
+    # 2) 拡張子なし：name.md / name.markdown
     local p3="$(dirname "$PARENT")/$spec.md"
     local p4="$(dirname "$PARENT")/$spec.markdown"
     [ -f "$p3" ] && { echo "$p3"; return; }
     [ -f "$p4" ] && { echo "$p4"; return; }
-    # 3) ワークスペース内を探索
+    # 3) ワークスペース内探索
     local f
     f="$(/usr/bin/find "$ROOT" -maxdepth 8 -type f \( -name "$spec.md" -o -name "$spec.markdown" \) 2>/dev/null | head -n1 || true)"
     [ -n "$f" ] && { echo "$f"; return; }
@@ -107,38 +141,40 @@ resolve_child() {
     [ -n "$f" ] && { echo "$f"; return; }
   fi
 
-  echo ""   # 解決失敗
+  echo ""  # 解決失敗
 }
 
 unresolved=0
 child_open_scan=0
+link_candidates=0
 
 for raw in "${LINKS_RAW[@]:-}"; do
-  kind="${raw%%$'\t'*}"       # LINK or EMBED
-  inner="${raw#*$'\t'}"       # [[...]] の中身
+  IFS=$'\t' read -r kind inner lineno <<<"$raw"
 
-  # 画像/添付の埋め込みはスキップ
+  # 埋め込みは除外
   if [ "$kind" = "EMBED" ]; then
-    [ "${VERBOSE:-}" = "1" ] && echo "[SKIP] embed: [[${inner}]]"
+    [ "${VERBOSE:-}" = "1" ] && echo "[SKIP] embed: line=$lineno [[${inner}]]"
     continue
   fi
 
   path="$(resolve_child "$inner")"
 
-  # 添付（.png/.svg/.pdf 等）はスキップ
-  if [ "$path" = "__ATTACH__" ]; then
-    [ "${VERBOSE:-}" = "1" ] && echo "[SKIP] attach: [[${inner}]]"
+  # 添付 / #heading / 空は除外
+  if [ "$path" = "__ATTACH__" ] || [ "$path" = "__SKIP__" ]; then
+    [ "${VERBOSE:-}" = "1" ] && echo "[SKIP] non-note: line=$lineno [[${inner}]]"
     continue
   fi
 
-  # 未解決はNGカウント
+  # ここまで来たら「ノート候補」
+  link_candidates=$((link_candidates+1))
+
   if [ -z "$path" ]; then
     unresolved=$((unresolved+1))
-    [ "${VERBOSE:-}" = "1" ] && echo "[UNRESOLVED] [[${inner}]]"
+    [ "${VERBOSE:-}" = "1" ] && echo "[UNRESOLVED] line=$lineno [[${inner}]]"
     continue
   fi
 
-  # 子の closed: を FM で検出
+  # 子の closed: をFMで検出
   flag=""
   awk '
     BEGIN{inFM=0}
@@ -149,13 +185,22 @@ for raw in "${LINKS_RAW[@]:-}"; do
 
   if [ "${flag:-}" != "CLOSED" ]; then
     child_open_scan=$((child_open_scan+1))
-    [ "${VERBOSE:-}" = "1" ] && echo "[OPEN] $(basename "${path%.*}")"
+    [ "${VERBOSE:-}" = "1" ] && echo "[OPEN] $(basename "${path%.*}") (from line $lineno)"
   fi
 done
 
-# --- 統合パッチここまで ---
+# ★ 安全ガード：本文にノート候補の LINK が1件も無ければ unresolved は 0 扱いにする
+if [ "$link_candidates" -eq 0 ]; then
+  unresolved=0
+fi
 
-# 最終判定（どれか1つでも残ってたらNG）
+[ "${VERBOSE:-}" = "1" ] && {
+  echo "link_candidates: $link_candidates"
+  echo "unresolved:      $unresolved"
+  echo "child_open_scan: $child_open_scan"
+}
+
+# 最終判定
 if [ "$unresolved" -gt 0 ] \
    || [ "$children_open_from_line" -gt 0 ] \
    || [ "$child_open_scan" -gt 0 ] \
