@@ -78,9 +78,16 @@ line ~ /^---[[:space:]]*$/ { inFM=1-inFM; next }
 }
 
 # --- spec → 実パス解決（.md/.markdown のみ、添付/アンカー除外） ---
+# 絶対パス正規化（存在しない場合でも親dirだけ実在に合わせる）
 canon() {
   local p="$1"
-  (cd "$(dirname "$p")" 2>/dev/null && pwd -P)/"$(basename "$p")"
+  # 親ディレクトリの実パス
+  local dir
+  dir="$(cd "$(dirname -- "$p")" 2>/dev/null && pwd -P)" || dir="$(dirname -- "$p")"
+  # ベース名（basenameコマンドは使わずパラメ展開）
+  local base="${p##*/}"
+  # 正規化したパスを出力
+  printf '%s/%s\n' "$dir" "$base"
 }
 
 resolve_child_path() {
