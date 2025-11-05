@@ -22,9 +22,7 @@ else
 fi
 
 [ "${VERBOSE:-}" = "1" ] && {
-  echo "== DEBUG =="
-  echo "PARENT: $PARENT"
-  echo "ROOT:   $ROOT"
+  echo "== DEBUG =="; echo "PARENT: $PARENT"; echo "ROOT:   $ROOT"
 }
 
 # A) 親のローカル未完 @行（@done除外）
@@ -55,20 +53,21 @@ if [ -n "${n:-}" ]; then children_open_from_line="$n"; fi
 [ "${VERBOSE:-}" = "1" ] && echo "children_open_from_line: $children_open_from_line"
 
 # B2) 本文の wikilink を走査（Front Matter外・コードフェンス外のみ）
-#     ![[...]] は EMBED で除外、[[...]] のみ LINK として扱う。行番号も残す。
+#     フェンス検出は正規表現を使わず「先頭3文字が ``` または ~~~」でトグル。
 mapfile -t LINKS_RAW < <(awk '
   BEGIN{inFM=0; inFence=0}
   { raw=$0; sub(/\r$/,"",raw); line=raw }
   NR==1 { sub(/^\xEF\xBB\xBF/,"",line) }
 
   # Front Matter トグル
-  line=="---" { inFM=1-inFM; next }
+  if (line=="---") { inFM=1-inFM; next }
 
   # FM内はスキップ
-  inFM==1 { next }
+  if (inFM==1) { next }
 
-  # コードフェンス（``` または ~~~）の開始/終了
-  if (match(line,/^(```|~~~)/)) { inFence = 1-inFence; next }
+  # コードフェンス（先頭3文字判定）
+  head3 = (length(line)>=3 ? substr(line,1,3) : line)
+  if (head3=="```" || head3=="~~~") { inFence = (inFence==0 ? 1 : 0); next }
   if (inFence==1) { next }
 
   # 本文のみで [[...]] / ![[...]] を抽出（行番号付き）
@@ -95,45 +94,31 @@ mapfile -t LINKS_RAW < <(awk '
 
 resolve_child() {
   local spec="$1"
-
-  # [[ID|別名]] → 左側、末尾空白除去
-  spec="${spec%%|*}"
-  spec="${spec%%[[:space:]]*}"
-
-  # [[#heading]] / [[^block]]：本体空ならスキップ
+  spec="${spec%%|*}"; spec="${spec%%[[:space:]]*}"     # [[ID|別名]]
   if [[ "$spec" == \#* || "$spec" == \^* || -z "$spec" ]]; then
-    echo "__SKIP__"
-    return
+    echo "__SKIP__"; return
   fi
-
-  # [[Note#heading]] / [[Note^block]] → 本体
-  spec="${spec%%#*}"
-  spec="${spec%%^*}"
+  spec="${spec%%#*}"; spec="${spec%%^*}"               # #heading/^block 切り落とし
 
   # 拡張子判定
   local lower ext
   lower="$(printf '%s' "$spec" | tr "A-Z" "a-z")"
   ext="${lower##*.}"
 
-  # 拡張子あり、かつ md/markdown 以外は添付 → 除外
   if [[ "$spec" == *.* ]] && [[ "$ext" != "md" && "$ext" != "markdown" ]]; then
-    echo "__ATTACH__"
-    return
+    echo "__ATTACH__"; return
   fi
 
-  # 1) 拡張子付き（.md/.markdown）: 相対→ROOT
   if [[ "$ext" == "md" || "$ext" == "markdown" ]]; then
     local p1="$(dirname "$PARENT")/$spec"
     local p2="$ROOT/$spec"
     [ -f "$p1" ] && { echo "$(cd "$(dirname "$p1")" && pwd -P)/$(basename "$p1")"; return; }
     [ -f "$p2" ] && { echo "$(cd "$(dirname "$p2")" && pwd -P)/$(basename "$p2")"; return; }
   else
-    # 2) 拡張子なし：name.md / name.markdown
     local p3="$(dirname "$PARENT")/$spec.md"
     local p4="$(dirname "$PARENT")/$spec.markdown"
     [ -f "$p3" ] && { echo "$p3"; return; }
     [ -f "$p4" ] && { echo "$p4"; return; }
-    # 3) ワークスペース内探索
     local f
     f="$(/usr/bin/find "$ROOT" -maxdepth 8 -type f \( -name "$spec.md" -o -name "$spec.markdown" \) 2>/dev/null | head -n1 || true)"
     [ -n "$f" ] && { echo "$f"; return; }
@@ -165,7 +150,7 @@ for raw in "${LINKS_RAW[@]:-}"; do
     continue
   fi
 
-  # ここまで来たら「ノート候補」
+  # ここまで来たらノート候補
   link_candidates=$((link_candidates+1))
 
   if [ -z "$path" ]; then
@@ -189,7 +174,7 @@ for raw in "${LINKS_RAW[@]:-}"; do
   fi
 done
 
-# ★ 安全ガード：本文にノート候補の LINK が1件も無ければ unresolved は 0 扱いにする
+# 本文にノート候補の LINK が1件も無ければ unresolved=0 扱い
 if [ "$link_candidates" -eq 0 ]; then
   unresolved=0
 fi
@@ -202,7 +187,7 @@ fi
 
 # 最終判定
 if [ "$unresolved" -gt 0 ] \
-   || [ "$children_open_from_line" -gt 0 ] \
+   || [ "$children_open_from_line" -gt 0] \
    || [ "$child_open_scan" -gt 0 ] \
    || [ "$local_open" -gt 0 ]; then
   echo "[NG] not closable."
