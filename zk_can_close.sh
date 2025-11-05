@@ -6,18 +6,18 @@ set -eu
 PARENT_IN="${1:-}"
 [ -n "$PARENT_IN" ] || { echo "usage: $0 <note.md>"; exit 2; }
 
-# Windowsパス→POSIX
+# Windowsパス→POSIX（Git Bash）
 PARENT="$PARENT_IN"
 if command -v cygpath >/dev/null 2>&1; then
   [[ "$PARENT" =~ ^[A-Za-z]:\\ ]] && PARENT="$(cygpath -u "$PARENT")"
 fi
 [ -f "$PARENT" ] || { echo "No such file: $PARENT_IN (resolved: $PARENT)"; exit 2; }
 
-# AWK 実体（gawk 優先）
+# AWK実体（gawk優先）
 AWK_BIN="$(command -v gawk || command -v awk)"
 [ -n "$AWK_BIN" ] || { echo "awk not found"; exit 2; }
 
-# ワークスペースルート
+# ルート推定
 if [ -n "${WORKSPACE_ROOT:-}" ] && [ -d "$WORKSPACE_ROOT" ]; then
   ROOT="$WORKSPACE_ROOT"
 elif command -v git >/dev/null 2>&1 && git -C "$(dirname "$PARENT")" rev-parse --show-toplevel >/dev/null 2>&1; then
@@ -34,7 +34,7 @@ AWK_CHILD_CLOSED="$(mktemp "$TMPDIR_LOCAL/.zk_child_closed.XXXX.awk")"
 AWK_DECLARED_PARENT="$(mktemp "$TMPDIR_LOCAL/.zk_declared_parent.XXXX.awk")"
 trap 'rm -f "$AWK_LOCAL_TASKS" "$AWK_CHILDREN_LINE" "$AWK_LINKS_RAW" "$AWK_CHILD_CLOSED" "$AWK_DECLARED_PARENT"' EXIT
 
-# A) ローカル未完 @行（@done 除外）
+# A) ローカル未完 @行（@done除外）
 cat >"$AWK_LOCAL_TASKS" <<'AWK'
 BEGIN { inFM=0 }
 {
@@ -61,7 +61,7 @@ inFM==0 && $0 ~ /^Children:[[:space:]]*open=/ {
 }
 AWK
 
-# B2) 本文の [[...]] / ![[...]] 抽出（FM外・フェンス外のみ）
+# B2) 本文の [[...]] / ![[...]] 抽出（FM外・フェンス外）
 cat >"$AWK_LINKS_RAW" <<'AWK'
 BEGIN { inFM=0; inFence=0 }
 {
@@ -104,17 +104,14 @@ $0=="---" { inFM=1-inFM; next }
 inFM==1 && $0 ~ /^closed:[[:space:]]*/ { print "CLOSED"; exit }
 AWK
 
-# ★ 追加：そのノートが明示している「親」を1つだけ拾う（FM優先→本文）
+# そのノートが宣言している親（FM優先→本文の parent: [[...]]）
 cat >"$AWK_DECLARED_PARENT" <<'AWK'
 BEGIN { inFM=0; got="" }
 {
   sub(/\r$/, "", $0);
   if (NR==1) sub(/^\xEF\xBB\xBF/, "", $0);
 }
-# FMトグル
 $0=="---" { inFM=1-inFM; next }
-
-# FM内 parent: [[...]] を最優先で1つだけ
 inFM==1 && got=="" {
   if ($0 ~ /^parent:[[:space:]]*\[\[[^]]+\]\]/) {
     line=$0; sub(/^parent:[[:space:]]*\[\[/,"",line); sub(/\]\].*$/,"",line);
@@ -122,8 +119,6 @@ inFM==1 && got=="" {
   }
   next
 }
-
-# 本文側に parent: [[...]] があれば補助的に1つ
 inFM==0 && got=="" {
   if ($0 ~ /^parent:[[:space:]]*\[\[[^]]+\]\]/) {
     line=$0; sub(/^parent:[[:space:]]*\[\[/,"",line); sub(/\]\].*$/,"",line);
@@ -132,22 +127,18 @@ inFM==0 && got=="" {
 }
 AWK
 
-# 実行：ローカル未完
+# 実行
 mapfile -t LOCAL_TASKS < <("$AWK_BIN" -f "$AWK_LOCAL_TASKS" "$PARENT")
 local_open=${#LOCAL_TASKS[@]}
 
-# Children: open=
 children_open_from_line=0
 n="$("$AWK_BIN" -f "$AWK_CHILDREN_LINE" "$PARENT" || true)"
 [ -n "$n" ] && children_open_from_line="$n"
 
-# 本文リンク
 mapfile -t LINKS_RAW < <("$AWK_BIN" -f "$AWK_LINKS_RAW" "$PARENT")
 
-# 宣言された「親」名（未指定なら空）
 declared_parent_spec="$("$AWK_BIN" -f "$AWK_DECLARED_PARENT" "$PARENT" || true)"
 
-# デバッグ
 [ "${VERBOSE:-}" = "1" ] && {
   echo "== DEBUG ==";
   echo "NOTE: $PARENT"
@@ -162,20 +153,21 @@ declared_parent_spec="$("$AWK_BIN" -f "$AWK_DECLARED_PARENT" "$PARENT" || true)"
   done
 }
 
-# 文字列spec → 実パス解決（.md/.markdownのみ）
+# ===== 文字列spec → 実パス解決（.md/.markdownのみ）=====
 resolve_child() {
   local spec="$1"
-  spec="${spec%%|*}"; spec="${spec%%[[:space:]]*}"   # [[ID|別名]]
+
+  # [[ID|別名]] → 左側（※空白は切らない！）
+  spec="${spec%%|*}"
 
   # [[#heading]] / [[^block]] / 空 → スキップ
   if [[ "$spec" == \#* || "$spec" == \^* || -z "$spec" ]]; then
     echo "__SKIP__"; return
   fi
-
-  # #heading / ^block を切り落とし
+  # #heading / ^block を切り落とし（内部空白は保持）
   spec="${spec%%#*}"; spec="${spec%%^*}"
 
-  # 添付（拡張子あり・md以外）は除外
+  # 添付（拡張子あり・md/markdown 以外）は除外
   local lower ext
   lower="$(printf '%s' "$spec" | tr 'A-Z' 'a-z')"
   ext="${lower##*.}"
@@ -183,7 +175,7 @@ resolve_child() {
     echo "__ATTACH__"; return
   fi
 
-  # 解決
+  # 解決：相対（同ディレクトリ）→ ルート直下 → ルート内検索
   if [[ "$ext" == "md" || "$ext" == "markdown" ]]; then
     local p1="$(dirname "$PARENT")/$spec"
     local p2="$ROOT/$spec"
@@ -204,11 +196,10 @@ resolve_child() {
   echo ""  # 解決失敗
 }
 
-# 宣言された親の実パスを求める（あれば）
+# 宣言された親の実パスを解決（あれば）
 declared_parent_path=""
 if [ -n "$declared_parent_spec" ]; then
   rp="$(resolve_child "$declared_parent_spec" || true)"
-  # 親ノートが .md で存在する場合のみ採用
   if [ -n "$rp" ] && [ "$rp" != "__ATTACH__" ] && [ "$rp" != "__SKIP__" ]; then
     declared_parent_path="$rp"
   fi
@@ -235,19 +226,19 @@ for raw in "${LINKS_RAW[@]:-}"; do
     continue
   fi
 
-  # ★ ここが肝：そのノートが宣言している親へのリンクは「子」として扱わない
+  # 親へのバックリンクは除外
   if [ -n "$declared_parent_path" ] && [ -n "$path" ] && [ "$path" = "$declared_parent_path" ]; then
     [ "${VERBOSE:-}" = "1" ] && echo "[SKIP] backlink-to-parent: line=$lineno [[${inner}]]"
     continue
   fi
 
-  # 自分自身へのループリンクも除外（稀にあるので）
+  # 自分自身へのリンクも除外
   if [ -n "$path" ] && [ "$(cd "$(dirname "$path")" && pwd -P)/$(basename "$path")" = "$(cd "$(dirname "$PARENT")" && pwd -P)/$(basename "$PARENT")" ]; then
     [ "${VERBOSE:-}" = "1" ] && echo "[SKIP] self-link: line=$lineno [[${inner}]]"
     continue
   fi
 
-  # ここまで来たら下向きの子リンク候補
+  # 子リンク候補
   link_candidates=$((link_candidates+1))
 
   if [ -z "$path" ]; then
@@ -256,7 +247,6 @@ for raw in "${LINKS_RAW[@]:-}"; do
     continue
   fi
 
-  # 子の closed: をFMで確認
   flag="$("$AWK_BIN" -f "$AWK_CHILD_CLOSED" "$path" || true)"
   if [ "$flag" != "CLOSED" ]; then
     child_open_scan=$((child_open_scan+1))
