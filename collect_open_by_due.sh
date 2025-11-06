@@ -1,116 +1,98 @@
 #!/usr/bin/env bash
-# collect_open_by_due.sh v2.3
-# Windows Git Bash / macOS / Linux
-# - front matter(先頭 --- までにある空行・BOM・CRLF)を許容
-# - 常にヘッダ＋統計を書き出す（空でも「何件見たか」が分かる）
-# - due: YYYY-MM-DD が無ければ 9999-12-31 として末尾送り
-# - closed: があれば除外
-# - --debug で探索ログ表示
+# md_open_due_dashboard.sh — Windows Git Bash / macOS / Linux 決定版
+# 1) 必ずヘッダを書き出す（空ファイルにならない）
+# 2) front matter は先頭30行までの最初の --- 〜 次の --- を解析
+# 3) closed: あり→除外、due: 無し→9999-12-31
+# 4) CRLF/BOM/日本語パス対応、-print0 使えない環境は自動フォールバック
+set -u
+set -o pipefail
 
-set -euo pipefail
-
-DEBUG=0
-if [[ "${1:-}" == "--debug" ]]; then DEBUG=1; shift; fi
+DEBUG="${DEBUG:-0}"               # DEBUG=1 で詳細ログ
 ROOT_IN="${1:-.}"
-OUT_IN="${2:-dashboards/open_by_due.md}"
+OUT_IN="${2:-open_by_due.md}"
 
-log(){ [[ $DEBUG -eq 1 ]] && echo "[DBG]" "$@" >&2 || true; }
-die(){ echo "[ERR]" "$@" >&2; exit 1; }
-
-# --- Path normalize ---
+# --- パス正規化（Git Bash on Windows） ---
 ROOT="$ROOT_IN"; OUT="$OUT_IN"
 if command -v cygpath >/dev/null 2>&1; then
-  [[ "$ROOT" =~ ^[A-Za-z]:[\\/].* ]] && ROOT="$(cygpath -u "$ROOT")"
-  d="$(dirname "$OUT")"; [[ "$d" =~ ^[A-Za-z]:[\\/].* ]] && OUT="$(cygpath -u "$OUT")"
+  case "$ROOT" in [A-Za-z]:/*|[A-Za-z]:\\*) ROOT="$(cygpath -u "$ROOT")";; esac
+  case "$OUT"  in [A-Za-z]:/*|[A-Za-z]:\\*) OUT="$(cygpath -u "$OUT")";;  esac
 fi
-fix_leading_slash(){ local p="$1"; [[ "$p" =~ ^[A-Za-z]/ ]] && p="/$p"; echo "$p"; }
-ROOT="$(fix_leading_slash "$ROOT")"
-OUT="$(fix_leading_slash "$OUT")"
+case "$ROOT" in [A-Za-z]/*) ROOT="/$ROOT";; esac
+case "$OUT"  in [A-Za-z]/*) OUT="/$OUT";;  esac
 
-# make OUT dir and pre-create empty file so“必ず存在”する
-mkdir -p "$(dirname "$OUT")" || die "cannot mkdir: $(dirname "$OUT")"
-: > "$OUT" || die "cannot create OUT: $OUT"
+mkdir -p "$(dirname "$OUT")" || { echo "[ERR] cannot mkdir: $(dirname "$OUT")" >&2; exit 1; }
 
-# abspath (after OUT exists)
-abspath(){ ( cd "$(dirname "$1")" >/dev/null 2>&1 || exit 1; echo "$(pwd -P)/$(basename "$1")"); }
-ROOT="$(abspath "$ROOT")"
-OUT="$(abspath "$OUT")"
-log "ROOT=$ROOT"; log "OUT=$OUT"
+TMP="${OUT}.tmp.$$"
+: > "$TMP" || { echo "[ERR] cannot create tmp: $TMP" >&2; exit 1; }
 
-TMP_ROWS="$(mktemp)" || die "mktemp rows failed"
-TMP_STAT="$(mktemp)" || die "mktemp stat failed"
-trap 'rm -f "$TMP_ROWS" "$TMP_STAT"' EXIT
-
-# --- AWK: front matter parser ---
-# 変更点: 先頭の空行をスキップしてから --- を期待
-#         BOM/CRLF を除去
-parse_awk='
-BEGIN{
-  infm=0; seen_start=0; has_closed=0
-  due=""; id=""; created=""; tags=""; parent=""
-  skipped_blank=1
-}
+# --- 先にヘッダを書いておく（ここで必ず中身ができる） ---
 {
-  sub(/\r$/,"",$0)                        # strip CR
-  if (NR==1) sub(/^\xEF\xBB\xBF/,"",$0)  # strip BOM
+  echo "# Open Tasks by Due Date"
+  echo
+  date_str=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date)
+  echo "- Generated: $date_str"
+  echo "- Root: \`$ROOT\`"
+} > "$OUT" || { echo "[ERR] cannot write OUT header: $OUT" >&2; exit 1; }
+
+# --- 収集（find -print0 優先、ダメなら改行区切りへ） ---
+COUNT=0
+
+scan_file() {
+  awk -v DEBUG="$DEBUG" '
+    BEGIN {
+      RS="\n"; FS="\n"
+      cr = sprintf("%c",13)
+      started=0; ended=0; fm_line=0
+      has_closed=0; due=""; max_seek=30
+    }
+    {
+      sub(/\r$/,"")                  # CRLF
+      if (NR<=max_seek && started==0) {
+        if ($0 ~ /^---[ \t]*$/) { started=1; next }
+        else if ($0 ~ /^[ \t]*$/) { next }   # 空行は許容
+        else { next }                         # ヘッダ前の雑多な行は読み飛ばし
+      }
+      else if (started==1 && ended==0) {
+        if ($0 ~ /^---[ \t]*$/) { ended=1; next }
+        if (match($0, /^[ \t]*([A-Za-z0-9_-]+):[ \t]*(.*)$/, m)) {
+          k=m[1]; v=m[2]
+          gsub(/^[\"\047]/,"",v); gsub(/[\"\047]$/,"",v)
+          if (k=="closed" && length(v)>0) has_closed=1
+          else if (k=="due" && length(v)>0) {
+            if (match(v, /[0-9]{4}-[0-9]{2}-[0-9]{2}/))      due=substr(v,RSTART,RLENGTH)
+            else if (match(v, /[0-9]{4}\/[0-9]{2}\/[0-9]{2}/)) {
+              d=substr(v,RSTART,RLENGTH); gsub(/\//,"-",d);  due=d
+            }
+          }
+        }
+      }
+    }
+    END {
+      if (started==1 && has_closed==0) {
+        if (due=="") due="9999-12-31"
+        printf "%s\t%s\n", due, FILENAME
+      }
+    }
+  ' "$1" >> "$TMP" || true
 }
-# 先頭の空行は無視
-skipped_blank && $0 ~ /^[ \t]*$/ { next }
-skipped_blank { skipped_blank=0 }
 
-NR>=1 {
-  if (!seen_start) {
-    if ($0 ~ /^---[ \t]*$/) { infm=1; seen_start=1; next }
-    else { exit } # 先頭付近に front matter 無ければ対象外
-  }
-}
-
-infm{
-  if ($0 ~ /^---[ \t]*$/){ infm=0; next }
-  if (match($0, /^([A-Za-z0-9_-]+):[ \t]*/)){
-    key=$1; sub(/:.*/,"",key)
-    val=$0; sub(/^[A-Za-z0-9_-]+:[ \t]*/,"",val)
-    if (key=="closed" && length(val)>0) has_closed=1
-    else if (key=="due")     due=val
-    else if (key=="id")      id=val
-    else if (key=="created") created=val
-    else if (key=="tags")    tags=val
-    else if (key=="parent")  parent=val
-  }
-  next
-}
-# 本文は読まない
-
-END{
-  fm=seen_start?1:0
-  if (due !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/) nd=1; else nd=0
-  # 統計行: fm(0/1) closed(0/1) nodue(0/1)
-  printf "STAT\tfm=%d\tclosed=%d\tnodue=%d\tfile=%s\n", fm, has_closed?1:0, nd, FILENAME > "'"$TMP_STAT"'"
-  if (!has_closed && fm==1) {
-    if (nd==1) due="9999-12-31"
-    printf "%s\t%s\t%s\t%s\t%s\t%s\n", due, FILENAME, id, created, tags, parent
-  }
-}'
-
-# --- Find ---
-FOUND=0
 if find "$ROOT" -type d \( -name .git -o -name node_modules -o -name .obsidian -o -name dashboards \) -prune -o -type f -name "*.md" -print0 >/dev/null 2>&1; then
-  log "using -print0 pipeline"
-  while IFS= read -r -d '' f; do
-    ((FOUND++))
-    [[ $DEBUG -eq 1 ]] && echo "[DBG] scan:" "$f" >&2
-    awk "$parse_awk" "$f" >>"$TMP_ROWS" || true
+  [ "$DEBUG" = "1" ] && echo "[DBG] using -print0 pipeline" >&2
+  while IFS= read -r -d '' F; do
+    COUNT=$((COUNT+1))
+    [ "$DEBUG" = "1" ] && echo "[DBG] scan: $F" >&2
+    scan_file "$F"
   done < <(
     find "$ROOT" \
       \( -type d \( -name .git -o -name node_modules -o -name .obsidian -o -name dashboards \) -prune \) -o \
       \( -type f -name "*.md" -print0 \)
   )
 else
-  log "fallback newline pipeline"
-  while IFS= read -r f; do
-    ((FOUND++))
-    [[ $DEBUG -eq 1 ]] && echo "[DBG] scan:" "$f" >&2
-    awk "$parse_awk" "$f" >>"$TMP_ROWS" || true
+  [ "$DEBUG" = "1" ] && echo "[DBG] fallback to newline pipeline" >&2
+  while IFS= read -r F; do
+    COUNT=$((COUNT+1))
+    [ "$DEBUG" = "1" ] && echo "[DBG] scan: $F" >&2
+    scan_file "$F"
   done < <(
     find "$ROOT" \
       \( -type d \( -name .git -o -name node_modules -o -name .obsidian -o -name dashboards \) -prune \) -o \
@@ -118,38 +100,26 @@ else
   )
 fi
 
-# --- 統計集計 ---
-SCANNED="$FOUND"
-FM=$(grep -c $'^STAT\tfm=1' "$TMP_STAT" || true)
-NOFM=$(grep -c $'^STAT\tfm=0' "$TMP_STAT" || true)
-CLOSED=$(grep -c $'^STAT\t.*\tclosed=1' "$TMP_STAT" || true)
-NODUE=$(grep -c $'^STAT\t.*\tnodue=1' "$TMP_STAT" || true)
-
-# --- Sort rows ---
-if [ -s "$TMP_ROWS" ]; then
-  LC_ALL=C sort -t $'\t' -k1,1 "$TMP_ROWS" -o "$TMP_ROWS"
+# --- 並べ替え & 本文追記 ---
+if [ -s "$TMP" ]; then
+  LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k2,2 "$TMP" -o "$TMP"
 fi
 
-# --- Render (常にヘッダ＋統計を書き出す) ---
 {
-  printf '# Open Tasks by Due Date\n\n'
-  printf '- Generated: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-  printf '\n- Root: `%s`\n' "$ROOT"
-  printf '- Scanned: %s files (front-matter: %s / no-front-matter: %s, closed: %s, no-due: %s)\n\n' \
-    "$SCANNED" "$FM" "$NOFM" "$CLOSED" "$NODUE"
-
-  if [ ! -s "$TMP_ROWS" ]; then
-    printf '_No open notes found (all closed or no front matter)._ \n'
+  echo "- Scanned: $COUNT files"
+  echo
+  if [ ! -s "$TMP" ]; then
+    echo "_No open notes found (all closed or no front matter)._"
   else
-    printf '| Due | File | id | created | tags |\n'
-    printf '| :-- | :--- | :-- | :------ | :--- |\n'
-    while IFS=$'\t' read -r due path id created tags parent; do
-      case "$path" in "$ROOT"/*) rp="${path#"$ROOT/"}";; *) rp="$path";; esac
-      printf '| %s | [%s](%s) | %s | %s | %s |\n' "$due" "$rp" "$rp" "${id:-}" "${created:-}" "${tags:-}"
-    done < "$TMP_ROWS"
+    echo "| Due | File |"
+    echo "| :-- | :--- |"
+    while IFS=$'\t' read -r D P; do
+      RP="$P"; case "$RP" in "$ROOT"/*) RP="${RP#"$ROOT/"}";; esac
+      printf "| %s | [%s](%s) |\n" "$D" "$RP" "$RP"
+    done < "$TMP"
   fi
-} > "$OUT" || die "cannot write OUT: $OUT"
+} >> "$OUT"
 
-BYTES=$(wc -c < "$OUT" | tr -d '[:space:]')
-echo "[OK] Wrote -> $OUT (size=${BYTES}B)"
-[[ $DEBUG -eq 1 ]] && head -n 8 "$OUT" | sed 's/^/[HEAD] /' >&2 || true
+rm -f "$TMP"
+[ "$DEBUG" = "1" ] && { echo "[DBG] OUT: $OUT" >&2; head -n 8 "$OUT" | sed 's/^/[HEAD] /' >&2; } || true
+echo "[OK] wrote -> $OUT"
