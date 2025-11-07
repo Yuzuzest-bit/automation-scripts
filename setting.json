@@ -1,7 +1,5 @@
 {
   "command-runner.commands": {
-    "Open Due（WS相対リンク）": "\"C:/Program Files/Git/git-bash.exe\" -lc \"cd \\\"/c/work/dev/aaaaaaaa\\\" && \\\"/c/work/dev/aaaaaaaa/md_open_due_list.sh\\\" \\\"/c/work/dev/aaaaaaaa/使用検討/設計検討メモ\\\"\"",
-
-    "Open Due（WS相対＋パスをクリップボード）": "\"C:/Program Files/Git/git-bash.exe\" -lc \"cd \\\"/c/work/dev/aaaaaaaa\\\" && CLIP=1 \\\"/c/work/dev/aaaaaaaa/md_open_due_list.sh\\\" \\\"/c/work/dev/aaaaaaaa/使用検討/設計検討メモ\\\"\""
+    "Open Due (safe)": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaaa/md_open_due_list.sh \\\"/C/work/dev/aaaaaa/使用検討/設計検討メモ\\\"\""
   }
 }
