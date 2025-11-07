@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# md_open_due_list.sh v3.4-rootbase (safe)
+# md_open_due_list.sh v3.6-outbase (safe + clipboard)
 # - 出力: スクリプトと同じ場所 open_due.md（固定）
 # - 引数: ROOT だけ（省略時は $PWD）
-# - リンク: ★ ROOT 基準（$PWD ではない）
-# - 箇条書き出力 / front matter 先頭30行 / closed除外 / due無→9999-12-31
-# - .md/.markdown/.mkd/.mdx（大小OK）、CRLF/BOM対応
-# - プロセス置換なし・外部アプリ起動なし
+# - リンク: 出力ファイルの場所(HERE)を基準に相対リンク
+# - クリップボード: 既定ON（CLIP=0で無効）。Windowsパスへ変換してコピー
+# - 自動起動なし / プロセス置換なし / ネットアクセスなし
 
 set -eu
 set -o pipefail
 
-ROOT_IN="${1:-$PWD}"   # 検索対象（省略時=カレント）
+ROOT_IN="${1:-$PWD}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
 OUT="$HERE/open_due.md"
@@ -34,12 +33,11 @@ relpath_from_base(){
   local IFS='/'; read -r -a T <<<"$ABS_TARGET"; read -r -a B <<<"$BASE"
   local i=0; while [[ $i -lt ${#T[@]} && $i -lt ${#B[@]} && "${T[$i]}" == "${B[$i]}" ]]; do ((i++)); done
   local up=""; for ((j=i;j<${#B[@]};j++)); do [[ -n "${B[$j]}" ]] && up+="../"; done
-  local down=""; for ((j=i;j<${#T[@]};j++)); do [[ -n "${T[$j]}" ]] && down+="${down:+/}${T[$j]}"; done
+  local down=""; for ((j=i;j<${#T[@]} ;j++)); do [[ -n "${T[$j]}" ]] && down+="${down:+/}${T[$j]}"; done
   printf '%s\n' "${up}${down:-.}"
 }
 
-# ★ ここが唯一の変更点：リンク基準は ROOT に固定
-BASE_DIR="$ROOT"
+BASE_DIR="$HERE"
 
 {
   echo "# Open Tasks by Due Date"
@@ -117,5 +115,13 @@ fi
     done < "$TMP"
   fi
 } >> "$OUT"
+
+# --- Clipboard (Windows の clip.exe を使う。問題あれば CLIP=0 で無効化) ---
+CLIP="${CLIP:-1}"
+if [ "$CLIP" = "1" ] && command -v cygpath >/dev/null 2>&1 && command -v clip.exe >/dev/null 2>&1; then
+  WINPATH="$(cygpath -w "$OUT")"
+  printf "%s" "$WINPATH" | clip.exe || true
+  echo "[CLIP] Copied to clipboard: $WINPATH"
+fi
 
 exit 0
