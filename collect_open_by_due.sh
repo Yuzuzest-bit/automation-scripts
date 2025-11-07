@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# md_open_due_list.sh v3.4 (safe mode)
-# - 出力ファイル: スクリプトと同じ場所 open_due.md（固定）
+# md_open_due_list.sh v3.5 (safe, VS Code用)
+# - 出力: スクリプトと同じ場所 open_due.md（固定）
 # - 引数: ROOT だけ（省略時は $PWD）
-# - リンク: 実行時カレント($PWD)からの相対
+# - リンク: WORKSPACE_ROOT があればそれ基準。無ければ ROOT 基準。
 # - 表ではなく箇条書き
 # - front matter: 先頭30行の最初の ---〜次の--- を解析
 # - closed: あり→除外 / due 無し→9999-12-31
 # - .md/.markdown/.mkd/.mdx（大小OK）、CRLF/BOM対応
-# - プロセス置換・外部アプリ起動なし、ネット/レジストリ操作なし
+# - プロセス置換/外部起動なし。必要時のみclip.exeでクリップボード
 
 set -eu
 set -o pipefail
 
 ROOT_IN="${1:-$PWD}"   # 検索対象（省略時=カレント）
+CLIP="${CLIP:-0}"      # 1で出力ファイルのフルパスをクリップボードへ
 
 # スクリプト自身の場所 & 出力先（固定）
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
@@ -29,23 +30,23 @@ case "$ROOT" in [A-Za-z]/*) ROOT="/$ROOT";; esac
 [ -d "$ROOT" ] || { echo "[ERR] ROOT not found: $ROOT" >&2; exit 1; }
 mkdir -p "$HERE" || { echo "[ERR] cannot mkdir: $HERE" >&2; exit 1; }
 
-# 相対パス計算（リンクは実行時カレント基準）
+# 相対パス計算（リンク用）
 abspath(){ ( cd "$(dirname "$1")" >/dev/null 2>&1 || exit 1; printf '%s/%s\n' "$(pwd -P)" "$(basename "$1")" ); }
 relpath_from_base(){
   local ABS_TARGET="$1" BASE="$2"
   ABS_TARGET="${ABS_TARGET%/}"; BASE="${BASE%/}"
   case "$ABS_TARGET" in /*) :;; *) ABS_TARGET="$(abspath "$ABS_TARGET")";; esac
   case "$BASE" in /*) :;; *) BASE="$(abspath "$BASE")";; esac
-  # /c と /d など別ボリュームなら相対不可→絶対で返す
   [[ "${ABS_TARGET%%/*}" != "${BASE%%/*}" ]] && { echo "$ABS_TARGET"; return; }
   local IFS='/'; read -r -a T <<<"$ABS_TARGET"; read -r -a B <<<"$BASE"
   local i=0; while [[ $i -lt ${#T[@]} && $i -lt ${#B[@]} && "${T[$i]}" == "${B[$i]}" ]]; do ((i++)); done
   local up=""; for ((j=i;j<${#B[@]};j++)); do [[ -n "${B[$j]}" ]] && up+="../"; done
-  local down=""; for ((j=i;j<${#T[@]};j++)); do [[ -n "${T[$j]}" ]] && down+="${down:+/}${T[$j]}"; done
+  local down=""; for ((j=i;j<${#T[@]})); do [[ -n "${T[$j]}" ]] && down+="${down:+/}${T[$j]}"; done
   printf '%s\n' "${up}${down:-.}"
 }
 
-BASE_DIR="$PWD"
+# ★ リンク基準：WORKSPACE_ROOT があればそれ、無ければ ROOT
+BASE_DIR="${WORKSPACE_ROOT:-$ROOT}"
 
 # ヘッダ（必ず書く）
 {
@@ -56,7 +57,7 @@ BASE_DIR="$PWD"
   echo "- Link base: \`$BASE_DIR\`"
 } > "$OUT" || { echo "[ERR] cannot write OUT: $OUT" >&2; exit 1; }
 
-# テンポラリ（ファイルに落としてから読む＝標準入力待ち回避）
+# テンポラリ（ファイル経由：AV/標準入力待ち対策）
 TMP="${OUT}.rows.$$"
 FLIST="${OUT}.list.$$"
 : > "$TMP"; : > "$FLIST"
@@ -70,7 +71,7 @@ prune_out=( -path "$OUT" -prune )
 TOTAL_FILES=$(find "$ROOT" -type f 2>/dev/null | wc -l | tr -d '[:space:]')
 MATCH_MD=$(find "$ROOT" \( "${prune[@]}" -o "${prune_out[@]}" \) -o \( -type f "${md_predicate[@]}" -print \) 2>/dev/null | wc -l | tr -d '[:space:]')
 
-# 対象ファイルリスト（NUL区切り）を作成
+# 対象ファイルをNUL区切りで収集
 find "$ROOT" \( "${prune[@]}" -o "${prune_out[@]}" \) -o \( -type f "${md_predicate[@]}" -print0 \) > "$FLIST" 2>/dev/null
 
 # 1ファイル解析（先頭30行の front matter）
@@ -104,7 +105,7 @@ scan_file(){
   ' "$1" >> "$TMP" || true
 }
 
-# リストを読み取って走査（標準入力は使わない）
+# リストを読み取って走査
 COUNT=0
 while IFS= read -r -d '' F <&3; do
   COUNT=$((COUNT+1))
@@ -116,7 +117,7 @@ if [ -s "$TMP" ]; then
   LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k2,2 "$TMP" -o "$TMP"
 fi
 
-# 箇条書きで追記（リンクは $PWD 基準）
+# 箇条書きで追記（リンクは BASE_DIR 基準）
 {
   echo "- Scanned (all files under root): ${TOTAL_FILES}"
   echo "- Matched markdown files: ${MATCH_MD}"
@@ -132,5 +133,10 @@ fi
   fi
 } >> "$OUT"
 
-# 正常終了（即時抜け）
+# クリップボード（任意・安全なclip.exeのみ使用）
+if [ "$CLIP" = "1" ] && command -v cygpath >/dev/null 2>&1 && command -v clip.exe >/dev/null 2>&1; then
+  WIN="$(cygpath -w "$OUT")"
+  printf "%s" "$WIN" | clip.exe || true
+fi
+
 exit 0
