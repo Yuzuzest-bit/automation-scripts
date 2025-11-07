@@ -1,7 +1,7 @@
-// settings.json
 {
-  "command-runner.terminal": "integrated",
   "command-runner.commands": {
-    "Open Due（WS基準）": "\"C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe\" -lc 'CLIP=1 WORKSPACE_ROOT=\"${workspaceFolder}\" \"/c/Users/you/scripts/md_open_due_list.sh\" \"${workspaceFolder}\"'"
+    "Open Due（WS相対リンク）": "\"C:/Program Files/Git/git-bash.exe\" -lc \"cd \\\"/c/work/dev/aaaaaaaa\\\" && \\\"/c/work/dev/aaaaaaaa/md_open_due_list.sh\\\" \\\"/c/work/dev/aaaaaaaa/使用検討/設計検討メモ\\\"\"",
+
+    "Open Due（WS相対＋パスをクリップボード）": "\"C:/Program Files/Git/git-bash.exe\" -lc \"cd \\\"/c/work/dev/aaaaaaaa\\\" && CLIP=1 \\\"/c/work/dev/aaaaaaaa/md_open_due_list.sh\\\" \\\"/c/work/dev/aaaaaaaa/使用検討/設計検討メモ\\\"\""
   }
 }
