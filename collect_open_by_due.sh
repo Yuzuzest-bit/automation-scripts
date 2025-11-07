@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# md_open_due_list.sh v3.6-outbase (safe + clipboard)
+# md_open_due_list.sh v3.7-outbase (safe + clipboard)
 # - 出力: スクリプトと同じ場所 open_due.md（固定）
 # - 引数: ROOT だけ（省略時は $PWD）
 # - リンク: 出力ファイルの場所(HERE)を基準に相対リンク
@@ -33,12 +33,14 @@ relpath_from_base(){
   local IFS='/'; read -r -a T <<<"$ABS_TARGET"; read -r -a B <<<"$BASE"
   local i=0; while [[ $i -lt ${#T[@]} && $i -lt ${#B[@]} && "${T[$i]}" == "${B[$i]}" ]]; do ((i++)); done
   local up=""; for ((j=i;j<${#B[@]};j++)); do [[ -n "${B[$j]}" ]] && up+="../"; done
-  local down=""; for ((j=i;j<${#T[@]} ;j++)); do [[ -n "${T[$j]}" ]] && down+="${down:+/}${T[$j]}"; done
+  local down=""; for ((j=i;j<${#T[@]};j++)); do [[ -n "${T[$j]}" ]] && down+="${down:+/}${T[$j]}"; done
   printf '%s\n' "${up}${down:-.}"
 }
 
+# リンク基準＝出力ファイルの場所
 BASE_DIR="$HERE"
 
+# ヘッダ
 {
   echo "# Open Tasks by Due Date"
   echo
@@ -111,12 +113,13 @@ fi
   else
     while IFS=$'\t' read -r D ABS; do
       REL="$(relpath_from_base "$ABS" "$BASE_DIR")"
-      printf -- "- %s  [%s](%s)\n" "$D" "$REL" "$REL"
+      NAME="$(basename "$REL")"                    # ← 表示名はファイル名だけ
+      printf -- "- %s  [%s](%s)\n" "$D" "$NAME" "$REL"
     done < "$TMP"
   fi
 } >> "$OUT"
 
-# --- Clipboard (Windows の clip.exe を使う。問題あれば CLIP=0 で無効化) ---
+# クリップボード（Windows標準のclip.exeのみ使用。CLIP=0で無効）
 CLIP="${CLIP:-1}"
 if [ "$CLIP" = "1" ] && command -v cygpath >/dev/null 2>&1 && command -v clip.exe >/dev/null 2>&1; then
   WINPATH="$(cygpath -w "$OUT")"
