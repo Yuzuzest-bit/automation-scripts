@@ -1,0 +1,3 @@
+"command-runner.commands": {
+  "make_tag_dashboard:all-open:win": "\"C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe\" -lc \"ROOT_WIN='${workspaceFolder}'; if [ -z \\\"$ROOT_WIN\\\" ]; then ROOT_WIN='C:\\\\work\\\\dev\\\\aaaaa_CCCCCC_bbbbb_V01'; fi; ROOT_POSIX=\\$(cygpath -u \\\"$ROOT_WIN\\\"); /usr/bin/env bash \\\"$ROOT_POSIX/make_tag_dashboard.sh\\\" \\\"\\\" \\\"ignored\\\" \\\"$ROOT_POSIX\\\"; if command -v code >/dev/null 2>&1; then code -r \\\"$ROOT_POSIX/dashboards/all_open_dashboard.md\\\"; else cmd.exe /c start \\\"\\\" \\\"\\$(cygpath -w \\\"$ROOT_POSIX/dashboards/all_open_dashboard.md\\\")\\\"; fi\"",
+_
