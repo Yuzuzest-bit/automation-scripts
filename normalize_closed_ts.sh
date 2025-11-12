@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# normalize_closed_ts.sh [ROOT_DIR=. ] [--dry-run] [--backup] [--include '*.md'] [--exclude-dir DIR]...
-# - "closed : YYYY-MM-DDTHH:MM:SS(+TZ|Z)" → "closed : YYYY-MM-DDTHH:MM"
-# - サブフォルダを含めて再帰的に処理
-# - macOS(BSD sed) / GNU sed 両対応
+# normalize_closed_ts_v2.sh [ROOT_DIR=. ] [--dry-run] [--backup] [--include '*.md'] [--exclude-dir DIR]...
+# "closed : YYYY-MM-DDTHH:MM:SS(+TZ|Z)" → "closed : YYYY-MM-DDTHH:MM"
 set -euo pipefail
 
 ROOT="."
@@ -14,16 +12,16 @@ BACKUP=0
 usage() {
   cat <<'USAGE'
 Usage:
-  normalize_closed_ts.sh [ROOT_DIR] [--dry-run] [--backup]
-                         [--include '<glob>'] [--exclude-dir DIR]...
-
+  normalize_closed_ts_v2.sh [ROOT_DIR] [--dry-run] [--backup]
+                            [--include '<glob>'] [--exclude-dir DIR]...
 Examples:
-  ./normalize_closed_ts.sh . --dry-run
-  ./normalize_closed_ts.sh ~/notes --backup --exclude-dir dashboards
-  ./normalize_closed_ts.sh . --include '*.markdown'
+  ./normalize_closed_ts_v2.sh . --dry-run
+  ./normalize_closed_ts_v2.sh ~/notes --backup --exclude-dir dashboards
+  ./normalize_closed_ts_v2.sh . --include '*.markdown'
 USAGE
 }
 
+# 引数処理
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY=1;;
@@ -36,7 +34,7 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-# sed -i の互換（GNU/BSD）
+# sed -i 互換
 if sed --version >/dev/null 2>&1; then
   SED_INPLACE=(-i)        # GNU sed
 else
@@ -46,52 +44,38 @@ fi
 # 秒とタイムゾーン(Z / +0900 / +09:00)を落とす
 REGEX='s/^([[:space:]]*closed[[:space:]]*:[[:space:]]*)([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}):[0-9]{2}(Z|[+\-][0-9]{2}:?[0-9]{2})?/\1\2/'
 
-# find コマンド（サブフォルダを含めて再帰）
-build_find() {
-  local -a CMD=("find" "$ROOT" -type d \( )
-  local first=1
-  for d in "${EXCLUDES[@]}"; do
-    if [[ $first -eq 0 ]]; then CMD+=(-o); fi
-    CMD+=( -path "*/$d" )
-    first=0
-  done
-  CMD+=( \) -prune -o -type f -name "$INCLUDE" -print0 )
-  printf '%q ' "${CMD[@]}"
-}
+# 括弧を使わずに -prune を連鎖させる（サブフォルダ再帰）
+FIND=(find "$ROOT")
+for d in "${EXCLUDES[@]}"; do
+  FIND+=(-path "*/$d" -prune -o)
+done
+FIND+=(-type f -name "$INCLUDE" -print0)
 
-FIND_CMD=()
-# shellcheck disable=SC2207
-FIND_CMD=($(build_find))
-
+# プレビュー（変更される行だけ before→after）
 if (( DRY )); then
-  # プレビュー表示（変更される行だけを before→after で）
   while IFS= read -r -d '' f; do
-    if grep -qE '^[[:space:]]*closed[[:space:]]*:[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' "$f"; then
-      echo ">>> $f"
-      awk '
-        {
-          if ($0 ~ /^[[:space:]]*closed[[:space:]]*:[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}/) {
-            before=$0
-            after=before
-            gsub(/^([[:space:]]*closed[[:space:]]*:[[:space:]]*)([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}):[0-9]{2}(Z|[+\-][0-9]{2}:?[0-9]{2})?/,"\\1\\2",after)
-            printf("  L%-5d: %s\n          -> %s\n", NR, before, after)
-          }
-        }' "$f"
-    fi
-  done < <("${FIND_CMD[@]}")
+    awk '
+      {
+        if ($0 ~ /^[[:space:]]*closed[[:space:]]*:[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}/) {
+          before=$0; after=$0
+          gsub(/^([[:space:]]*closed[[:space:]]*:[[:space:]]*)([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}):[0-9]{2}(Z|[+\-][0-9]{2}:?[0-9]{2})?/,"\\1\\2",after)
+          printf(">>> %s\n  L%-5d: %s\n          -> %s\n", FILENAME, NR, before, after)
+        }
+      }' "$f"
+  done < <("${FIND[@]}")
   exit 0
 fi
 
-# 任意：バックアップ作成
+# 任意バックアップ
 if (( BACKUP )); then
   while IFS= read -r -d '' f; do
     cp -p "$f" "$f.bak"
-  done < <("${FIND_CMD[@]}")
+  done < <("${FIND[@]}")
 fi
 
-# 置換の実行
+# 実置換
 while IFS= read -r -d '' f; do
   sed -E "${SED_INPLACE[@]}" "$REGEX" "$f"
-done < <("${FIND_CMD[@]}")
+done < <("${FIND[@]}")
 
 echo "Done."
