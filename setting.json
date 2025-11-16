@@ -16,6 +16,9 @@
   // 現在のファイルの id を表示する
   "zk:show-current-id": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/c/work/inidivi-valt/zk_print_id.sh \\\"${file}\\\"\"",
   
-  "dash-nw-win": "\"C:/Program Files/Git/git-bash.exe\" -lc '/c/work/indivi-valt/dash_by_tags.sh \"/c/work/indivi-valt\" nw'"    
+  "dash-nw-win": "\"C:/Program Files/Git/git-bash.exe\" -lc '/c/work/indivi-valt/dash_by_tags.sh \"/c/work/indivi-valt\" nw'",
+
+  // ハブノート
+  "open-hub-nwsp-win": "\"C:/Program Files/Git/git-bash.exe\" -lc 'ROOT=\"/c/work/indivi-valt\"; cd \"$ROOT\"; \"$ROOT/open_hub.sh\" nwsp \"$ROOT\"'",
 
 }
