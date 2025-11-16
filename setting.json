@@ -14,6 +14,8 @@
   "new:excalidraw-here": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/c/work/inidivi-valt/new_excalidraw_here.sh \\\"${file}\\\"\"",
 
   // 現在のファイルの id を表示する
-  "zk:show-current-id": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/c/work/inidivi-valt/zk_print_id.sh \\\"${file}\\\"\""
+  "zk:show-current-id": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/c/work/inidivi-valt/zk_print_id.sh \\\"${file}\\\"\"",
+  
+  "dash-nw-win": "\"C:/Program Files/Git/git-bash.exe\" -lc '/c/work/indivi-valt/dash_by_tags.sh \"/c/work/indivi-valt\" nw'"    
 
 }
