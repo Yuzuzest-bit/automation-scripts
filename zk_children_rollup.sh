@@ -177,4 +177,72 @@ for rec in "${LINKS_RAW[@]:-}"; do
     inFM==1 && $0 ~ /^closed:[[:space:]]*/ { print "CLOSED"; exit }
   ' "$ch_path" || true)"
 
-  if [ "$closed]()
+  if [ "$closed_flag" = "CLOSED" ]; then
+    [ "${VERBOSE:-0}" -ge 1 ] && echo "[OK-CHILD-CLOSED] $(basename "${ch_path%.*}") (line $ln)"
+    continue
+  fi
+
+  # OPEN の場合、本文の @行から due 最小を拾う（@done は除外）
+  dmin="9999-99-99"
+  while IFS= read -r cl; do
+    cl="${cl%$'\r'}"
+    [[ "${cl:0:1}" = "@" ]] || continue
+    [[ "$cl" == @done* ]] && continue
+    [[ "$cl" == *"due:"* ]] || continue
+    cand="${cl#*due:}"; cand="${cand:0:10}"
+    [[ "$cand" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue
+    [[ "$cand" < "$dmin" ]] && dmin="$cand"
+  done < "$ch_path"
+
+  open_count=$((open_count+1))
+  if [ "$dmin" != "9999-99-99" ] && [[ "$dmin" < "$earliest" ]]; then
+    earliest="$dmin"
+  fi
+  [ "${VERBOSE:-0}" -ge 1 ] && echo "[OPEN] child $(basename "${ch_path%.*}") due=${dmin} (from line $ln)"
+done
+
+# --- 書き戻し（FM直後） ---
+children="Children: open=${open_count}"
+[ "$earliest" != "9999-99-99" ] && children="${children} next_due=${earliest}"
+
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+inFM=0
+fmDone=0
+inserted=0
+
+while IFS= read -r line; do
+  # CRLF 耐性
+  [ "${line%$'\r'}" != "$line" ] && line="${line%$'\r'}"
+
+  # 先頭の frontmatter ブロックだけを認識して、その直後に Children 行を入れる
+  if [ "$line" = "---" ] && [ $fmDone -eq 0 ]; then
+    if [ $inFM -eq 0 ]; then
+      # frontmatter 開始
+      inFM=1
+      echo "$line" >> "$TMP"
+      continue
+    else
+      # frontmatter 終了
+      inFM=0
+      fmDone=1
+      echo "$line" >> "$TMP"
+      if [ $inserted -eq 0 ]; then
+        echo "$children" >> "$TMP"
+        inserted=1
+      fi
+      continue
+    fi
+  fi
+
+  # 既存 Children 行は捨てる（常に最新へ差し替え）
+  if [[ "$line" == "Children:"* ]]; then
+    continue
+  fi
+
+  echo "$line" >> "$TMP"
+done < "$PARENT"
+
+mv "$TMP" "$PARENT"
+echo "[OK] Children rollup updated -> $PARENT"
+[ "${VERBOSE:-0}" -ge 1 ] && echo "summary: candidates=${link_candidates} open=${open_count} earliest=${earliest}"
