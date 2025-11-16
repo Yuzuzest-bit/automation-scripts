@@ -38,13 +38,19 @@ FIND_BIN="$(command -v find || true)"
 # --- 本文（FM外・コードフェンス外）から [[...]] / ![[...]] を抽出（行番号つき） ---
 # kind=LINK だけを採用（EMBEDは無視）
 mapfile -t LINKS_RAW < <("$AWK_BIN" '
-BEGIN { inFM=0; inFence=0 }
+BEGIN { inFM=0; fmDone=0; inFence=0 }
 {
   raw=$0; sub(/\r$/, "", raw); line=raw;
   if (NR==1) sub(/^\xEF\xBB\xBF/, "", line);
 }
-# FMトグル（--- の行、末尾空白許容）
-line ~ /^---[[:space:]]*$/ { inFM=1-inFM; next }
+# FMトグル（先頭の FM ブロックだけを frontmatter とみなす）
+(line ~ /^---[[:space:]]*$/ && fmDone==0) {
+  if (inFM==0) {
+    inFM=1; next;
+  } else {
+    inFM=0; fmDone=1; next;
+  }
+}
 (inFM==1) { next }
 
 # コードフェンス（行頭空白OK、``` or ~~~ でトグル）
@@ -158,70 +164,17 @@ for rec in "${LINKS_RAW[@]:-}"; do
   link_candidates=$((link_candidates+1))
 
   # 子が CLOSED かどうか（FMの closed: で判定）
-  state="OPEN"; due="-"
   closed_flag="$("$AWK_BIN" '
-    BEGIN{inFM=0}
+    BEGIN{inFM=0; fmDone=0}
     {
       sub(/\r$/, "", $0);
       if (NR==1) sub(/^\xEF\xBB\xBF/, "", $0);
     }
-    $0 ~ /^---[[:space:]]*$/ { inFM=1-inFM; next }
+    ($0 ~ /^---[[:space:]]*$/ && fmDone==0) {
+      if (inFM==0) { inFM=1; next }
+      else         { inFM=0; fmDone=1; next }
+    }
     inFM==1 && $0 ~ /^closed:[[:space:]]*/ { print "CLOSED"; exit }
   ' "$ch_path" || true)"
 
-  if [ "$closed_flag" = "CLOSED" ]; then
-    [ "${VERBOSE:-0}" -ge 1 ] && echo "[OK-CHILD-CLOSED] $(basename "${ch_path%.*}") (line $ln)"
-    continue
-  fi
-
-  # OPEN の場合、本文の @行から due 最小を拾う（@done は除外）
-  dmin="9999-99-99"
-  while IFS= read -r cl; do
-    cl="${cl%$'\r'}"
-    [[ "${cl:0:1}" = "@" ]] || continue
-    [[ "$cl" == @done* ]] && continue
-    [[ "$cl" == *"due:"* ]] || continue
-    cand="${cl#*due:}"; cand="${cand:0:10}"
-    [[ "$cand" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue
-    [[ "$cand" < "$dmin" ]] && dmin="$cand"
-  done < "$ch_path"
-
-  open_count=$((open_count+1))
-  if [ "$dmin" != "9999-99-99" ] && [[ "$dmin" < "$earliest" ]]; then
-    earliest="$dmin"
-  fi
-  [ "${VERBOSE:-0}" -ge 1 ] && echo "[OPEN] child $(basename "${ch_path%.*}") due=${dmin} (from line $ln)"
-done
-
-# --- 書き戻し（FM直後） ---
-children="Children: open=${open_count}"
-[ "$earliest" != "9999-99-99" ] && children="${children} next_due=${earliest}"
-
-TMP="$(mktemp)"
-trap 'rm -f "$TMP"' EXIT
-inFM=0 inserted=0
-while IFS= read -r line; do
-  # CRLF 耐性
-  [ "${line%$'\r'}" != "$line" ] && line="${line%$'\r'}"
-
-  if [ "$line" = "---" ]; then
-    inFM=$((1-inFM))
-    echo "$line" >> "$TMP"
-    if [ $inFM -eq 0 ] && [ $inserted -eq 0 ]; then
-      echo "$children" >> "$TMP"
-      inserted=1
-    fi
-    continue
-  fi
-
-  # 既存 Children 行は捨てる（常に最新へ差し替え）
-  if [ $inFM -eq 0 ] && [[ "$line" == "Children:"* ]]; then
-    continue
-  fi
-
-  echo "$line" >> "$TMP"
-done < "$PARENT"
-
-mv "$TMP" "$PARENT"
-echo "[OK] Children rollup updated -> $PARENT"
-[ "${VERBOSE:-0}" -ge 1 ] && echo "summary: candidates=${link_candidates} open=${open_count} earliest=${earliest}"
+  if [ "$closed]()
