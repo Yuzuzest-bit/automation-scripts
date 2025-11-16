@@ -1,3 +1,19 @@
 "command-runner.commands": {
-    "zk:show-current-id": "\"C:/Program Files/Git/bin/bash.exe\" -lc 'cd \"/c/work/indivi-valt\"; ./zk_print_id.sh \"${file}\"'"
+    "zk:show-current-id": "\"C:/Program Files/Git/bin/bash.exe\" -lc 'cd \"/c/work/indivi-valt\"; ./zk_print_id.sh \"${file}\"'",
+  // 行政の通知など
+  "tag:doc-official-admin": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/c/work/inidivi-valt/zk_tags.sh \\\"${file}\\\" +doc-official +ctx-admin -doc-manual -doc-spec -doc-receipt -doc-attachment\"",
+
+  // とりあえず添付しただけ（後で分類する用）
+  "tag:doc-attachment": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/c/work/inidivi-valt/zk_tags.sh \\\"${file}\\\" +doc-attachment -doc-manual -doc-spec -doc-receipt -doc-official\"",
+
+  // AND条件で検索するスクリプト
+  // この例では zk-seed ns am1 sec wrong を全て持つものが検索対象
+  "filter ns-am1-sec-wrong-seed": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/c/work/inidivi-valt/dash_by_tags.sh \\\"/c/work/inidivi-valt\\\" zk-seed ns am1 sec wrong; code -r \\\"/c/work/inidivi-valt/dashboards/tags_zk-seed_ns_am1_sec_wrong.md\\\"\"",
+
+  // Excalidraw を現在のファイルと同じ階層に作る
+  "new:excalidraw-here": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/c/work/inidivi-valt/new_excalidraw_here.sh \\\"${file}\\\"\"",
+
+  // 現在のファイルの id を表示する
+  "zk:show-current-id": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/c/work/inidivi-valt/zk_print_id.sh \\\"${file}\\\"\""
+
 }
