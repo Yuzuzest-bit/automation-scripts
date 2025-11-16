@@ -1,5 +1,3 @@
-{
-  "command-runner.commands": {
-    "Open Due (safe)": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaaa/md_open_due_list.sh \\\"/C/work/dev/aaaaaa/使用検討/設計検討メモ\\\"\""
-  }
+"command-runner.commands": {
+    "zk:show-current-id": "\"C:/Program Files/Git/bin/bash.exe\" -lc 'cd \"/c/work/indivi-valt\"; ./zk_print_id.sh \"${file}\"'"
 }
