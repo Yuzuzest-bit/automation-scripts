@@ -1,119 +1,168 @@
 #!/usr/bin/env bash
-# note_rollup.sh (Windows Git Bash対応)
-# 小タスク（@〜）を集計してRollup行を更新/挿入
-# 変更点: @done* 行は next_due 算出から除外
+# note_rollup.sh
+# 目的:
+#  - ノート本文(@行)から未完タスクを集計して
+#    Rollup: tasks=N focus:x progress:y extract:z awaiting:a hold:b later:c option:d primary=XXX
+#    の行を更新/挿入する
+# 前提:
+#  - 先頭に YAML frontmatter がある（--- で開始/終了）
+#  - 本文中の --- は水平線として使われており、frontmatter とは無関係
 
-set -eu
-FILE="${1:-}"
-if [ ! -f "$FILE" ]; then
-  echo "usage: $0 <markdown-file>" >&2
+set -euo pipefail
+
+IN="${1:-}"
+if [ -z "$IN" ]; then
+  echo "usage: $0 <note.md>" >&2
   exit 1
 fi
 
-BASENAME="$(basename "$FILE" .md)"
+# Windows パス → POSIX
+FILE="$IN"
+if command -v cygpath >/dev/null 2>&1; then
+  case "$FILE" in [A-Za-z]:\\*) FILE="$(cygpath -u "$FILE")" ;; esac
+fi
+[ -f "$FILE" ] || { echo "Not a regular file: $IN (resolved: $FILE)" >&2; exit 1; }
+
+AWK_BIN="$(command -v gawk || command -v awk)"
+[ -n "$AWK_BIN" ] || { echo "awk not found" >&2; exit 1; }
+
+# --- 1パス目: タスク集計 + Rollup/Frontmatter の有無 ----
+meta="$("$AWK_BIN" '
+BEGIN{
+  inFM=0; fmDone=0; inFence=0;
+  tasks=0; focus=0; progress=0; extract=0; awaiting=0; hold=0; later=0; option=0;
+  hasRoll=0; hasFM=0;
+}
+{
+  # 行正規化
+  sub(/\r$/, "", $0);
+  if (NR==1) sub(/^\xEF\xBB\xBF/, "", $0);
+
+  # 既存 Rollup 行チェック
+  if ($0 ~ /^Rollup:[[:space:]]*tasks=/) {
+    hasRoll=1;
+  }
+
+  # frontmatter の境界（最初のブロックだけ特別扱い）
+  if ($0 ~ /^---[[:space:]]*$/) {
+    if (fmDone==0) {
+      if (NR==1 && inFM==0) {
+        # 先頭の --- → frontmatter開始
+        inFM=1; hasFM=1; next;
+      } else if (inFM==1) {
+        # 2つ目の --- → frontmatter終了
+        inFM=0; fmDone=1; next;
+      }
+    }
+  }
+
+  # frontmatter 中は解析しない
+  if (inFM==1) next;
+
+  # コードフェンス
+  t=$0; sub(/^[[:space:]]+/, "", t);
+  if (t ~ /^```/ || t ~ /^~~~/) {
+    inFence = 1-inFence;
+    next;
+  }
+  if (inFence==1) next;
+
+  # 本文の @行（行頭 or 行頭に空白可）
+  if ($0 ~ /^[[:space:]]*@/) {
+    # @done はクローズ済みとして無視
+    if ($0 ~ /^[[:space:]]*@done([[:space:]]|:|$)/) next;
+
+    # 代表ステータスを判定
+    if ($0 ~ /^[[:space:]]*@focus([[:space:]]|:|$)/)    { focus++;   tasks++; next; }
+    if ($0 ~ /^[[:space:]]*@progress([[:space:]]|:|$)/) { progress++;tasks++; next; }
+    if ($0 ~ /^[[:space:]]*@extract([[:space:]]|:|$)/)  { extract++; tasks++; next; }
+    if ($0 ~ /^[[:space:]]*@awaiting([[:space:]]|:|$)/) { awaiting++;tasks++; next; }
+    if ($0 ~ /^[[:space:]]*@hold([[:space:]]|:|$)/)     { hold++;    tasks++; next; }
+    if ($0 ~ /^[[:space:]]*@later([[:space:]]|:|$)/)    { later++;   tasks++; next; }
+    if ($0 ~ /^[[:space:]]*@option([[:space:]]|:|$)/)   { option++;  tasks++; next; }
+
+    # その他の @xxx も一応タスクとしてカウントだけ増やす
+    tasks++;
+  }
+}
+END{
+  primary="none";
+  if (tasks>0) {
+    if      (focus   >0) primary="focus";
+    else if (progress>0) primary="progress";
+    else if (awaiting>0) primary="awaiting";
+    else if (hold    >0) primary="hold";
+    else if (later   >0) primary="later";
+    else if (option  >0) primary="option";
+    else if (extract >0) primary="extract";
+  }
+  # 出力: rollup_line \t hasRoll \t hasFM
+  printf("Rollup: tasks=%d focus:%d progress:%d extract:%d awaiting:%d hold:%d later:%d option:%d primary=%s\t%d\t%d\n",
+         tasks, focus, progress, extract, awaiting, hold, later, option, primary,
+         hasRoll, hasFM);
+}
+' "$FILE")"
+
+ROLL_LINE="${meta%%$'\t'*}"
+rest="${meta#*$'\t'}"
+HAS_ROLL="${rest%%$'\t'*}"
+HAS_FM="${rest##*$'\t'}"
+
+[ "${VERBOSE:-0}" -ge 1 ] && {
+  echo "[DBG] ROLL_LINE=${ROLL_LINE}"
+  echo "[DBG] HAS_ROLL=${HAS_ROLL} HAS_FM=${HAS_FM}"
+}
+
+# --- 2パス目: ファイルに Rollup 行を書き戻す ---
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 
-# 集計カウンタ
-declare -A counts=(
-  [focus]=0 [progress]=0 [awaiting]=0 [hold]=0 [later]=0 [option]=0
-)
+"$AWK_BIN" -v roll="$ROLL_LINE" -v hasRoll="$HAS_ROLL" -v hasFM="$HAS_FM" '
+BEGIN{
+  inFM=0; fmDone=0; inserted=0;
+}
+{
+  sub(/\r$/, "", $0);
+  if (NR==1) sub(/^\xEF\xBB\xBF/, "", $0);
 
-earliest_due="9999-99-99"
-first_line=""
-inFM=0
+  # frontmatter 開始/終了（最初のブロックだけ）
+  if ($0 ~ /^---[[:space:]]*$/ && fmDone==0) {
+    if (NR==1 && inFM==0) {
+      inFM=1;
+      print $0;
+      next;
+    } else if (inFM==1) {
+      inFM=0; fmDone=1;
+      print $0;
+      # frontmatter があって Rollup がまだ無い場合はここで挿入
+      if (inserted==0 && hasRoll=="0") {
+        print roll;
+        inserted=1;
+      }
+      next;
+    }
+  }
 
-# -------- 第一走査：統計取得 --------
-while IFS= read -r line; do
-  [[ "$line" == "---" ]] && { inFM=$((1-inFM)); continue; }
+  # 既存 Rollup 行は差し替える
+  if ($0 ~ /^Rollup:[[:space:]]*tasks=/) {
+    if (inserted==0) {
+      print roll;
+      inserted=1;
+    }
+    # 古い Rollup 行は捨てる
+    next;
+  }
 
-  # Front Matter 外の最初の行
-  if [ $inFM -eq 0 ] && [ -z "$first_line" ]; then
-    first_line="$line"
-  fi
-
-  # 行頭@をチェック
-  if [ $inFM -eq 0 ] && [[ "$line" == @* ]]; then
-    tag="${line%% *}"      # 例: @progress / @done:2025-...
-    tag="${tag#@}"         # progress / done:2025-...
-    tag="${tag,,}"         # 小文字化
-
-    # 既知タグのみカウント（@done はここで無視される）
-    if [[ -n "${counts[$tag]+x}" ]]; then
-      counts[$tag]=$((counts[$tag]+1))
-    fi
-
-    # --- ここが今回のポイント ---
-    # @done* の行は next_due の候補から除外
-    if [[ "$line" == @done* ]]; then
-      continue
-    fi
-    # ----------------------------
-
-    # due日付を抽出（@done 以外のみ）
-    if [[ "$line" == *"due:"* ]]; then
-      after="${line#*due:}"
-      cand="${after:0:10}"
-      # YYYY-MM-DD 形式っぽいときだけ比較
-      if [[ "$cand" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-        if [[ "$cand" < "$earliest_due" ]]; then
-          earliest_due="$cand"
-        fi
-      fi
-    fi
-  fi
-done < "$FILE"
-
-# 状態の優先順位
-order=(focus progress awaiting hold later option)
-primary="none"
-for t in "${order[@]}"; do
-  if [ "${counts[$t]}" -gt 0 ]; then
-    primary="$t"
-    break
-  fi
-done
-
-total=0
-for v in "${counts[@]}"; do total=$((total+v)); done
-
-rollup="Rollup: tasks=${total} [focus:${counts[focus]} progress:${counts[progress]} awaiting:${counts[awaiting]} hold:${counts[hold]} later:${counts[later]} option:${counts[option]}] primary=${primary}"
-if [ "$earliest_due" != "9999-99-99" ]; then
-  rollup="${rollup} next_due=${earliest_due}"
-fi
-
-# -------- 第二走査：書き戻し --------
-inFM=0; inserted=0; first_done=0
-while IFS= read -r line; do
-  if [ "$line" == "---" ]; then
-    inFM=$((1-inFM))
-    echo "$line" >> "$TMP"
-    if [ $inFM -eq 0 ] && [ $inserted -eq 0 ]; then
-      echo "$rollup" >> "$TMP"
-      inserted=1
-    fi
-    continue
-  fi
-
-  # 既存Rollup行を置き換え（常に最新で上書き）
-  if [ $inFM -eq 0 ] && [[ "$line" == "Rollup:"* ]]; then
-    continue
-  fi
-
-  # 複数タスクある場合、先頭が @〜 なら中立化
-  if [ $inFM -eq 0 ] && [ $first_done -eq 0 ]; then
-    first_done=1
-    if [ $total -gt 1 ] && [[ "$first_line" == @* ]]; then
-      rest="${first_line#*@}"
-      rest="${rest#* }"
-      [ -z "$rest" ] && rest="$BASENAME"
-      echo "Scope: ${rest}" >> "$TMP"
-      continue
-    fi
-  fi
-
-  echo "$line" >> "$TMP"
-done < "$FILE"
+  print $0;
+}
+END{
+  # frontmatter も Rollup も無いケース → 末尾に Rollup を追記
+  if (inserted==0) {
+    print roll;
+  }
+}
+' "$FILE" > "$TMP"
 
 mv "$TMP" "$FILE"
-echo "[OK] Rollup updated (next_due excludes @done) -> $FILE"
+
+[ "${VERBOSE:-0}" -ge 1 ] && echo "[OK] Rollup updated in $FILE: $ROLL_LINE"
