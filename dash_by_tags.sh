@@ -7,7 +7,7 @@
 # 仕様:
 # - ルートディレクトリはこの .sh が置かれているフォルダ
 # - その配下のサブフォルダを find で再帰的に探索
-# - dashboards/tags_...md を出力
+# - dashboards/tags_search.md に毎回上書き出力
 
 set -euo pipefail
 
@@ -26,14 +26,8 @@ TAGS=("$@")
 OUTDIR="$ROOT/dashboards"
 mkdir -p "$OUTDIR"
 
-# 出力ファイル名: tags_tag1_tag2.md
-outname="tags"
-for t in "${TAGS[@]}"; do
-  # 念のためスペースは - に置き換え
-  tmp="${t// /-}"
-  outname="${outname}_${tmp}"
-done
-OUTFILE="$OUTDIR/${outname}.md"
+# ★ 出力ファイル名は固定（VS Code から常にこれを開けばOK）
+OUTFILE="$OUTDIR/tags_search.md"
 
 NOW="$(date '+%Y-%m-%d %H:%M')"
 export LC_ALL=C
