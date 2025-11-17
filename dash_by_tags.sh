@@ -1,26 +1,22 @@
 #!/usr/bin/env bash
-# dash_by_tags.sh <ROOT_DIR> <tag1> [tag2 ...]
+# dash_by_tags.sh <tag1> [tag2 ...]
 # frontmatter tags: に指定されたタグ群をもとに、
 # 指定したタグをすべて含むノートのダッシュボードを作成する
 # macOS(Homebrew bash) / Windows Git Bash 想定
+#
+# 仕様:
+# - ルートディレクトリはこの .sh が置かれているフォルダ
+# - その配下のサブフォルダを find で再帰的に探索
+# - dashboards/tags_...md を出力
 
 set -euo pipefail
 
-ROOT_ARG="${1:-}"
-if [[ -z "$ROOT_ARG" ]]; then
-  echo "usage: $0 <ROOT_DIR> <tag1> [tag2 ...]" >&2
-  exit 2
-fi
-ROOT="$ROOT_ARG"
-shift
-
-if [[ ! -d "$ROOT" ]]; then
-  echo "Not a directory: $ROOT" >&2
-  exit 1
-fi
+# このスクリプト自身が置かれているディレクトリをルートにする
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+ROOT="$SCRIPT_DIR"
 
 if [[ "$#" -lt 1 ]]; then
-  echo "need at least one tag" >&2
+  echo "usage: $0 <tag1> [tag2 ...]" >&2
   exit 2
 fi
 
@@ -52,7 +48,7 @@ for t in "${TAGS[@]}"; do
   fi
 done
 
-# 除外ディレクトリ（zk_make_dashboards.sh と同じ感じ）
+# 除外ディレクトリ（必要に応じて環境変数で追加も可）
 DEFAULT_SKIPS=".git .vscode .obsidian .foam node_modules templates template dashboards"
 EXTRA_SKIPS="${ZK_DASH_SKIP_DIRS:-}"
 SKIP_DIRS="${DEFAULT_SKIPS} ${EXTRA_SKIPS}"
@@ -60,7 +56,7 @@ SKIP_DIRS="${DEFAULT_SKIPS} ${EXTRA_SKIPS}"
 TMP_FILE="$(mktemp "${TMPDIR:-/tmp}/zktags.XXXXXX")"
 trap 'rm -f "$TMP_FILE"' EXIT
 
-# find の引数を配列で組み立て
+# find の引数を配列で組み立て（サブフォルダも再帰的に探索）
 FIND_ARGS=( "$ROOT" -type f -name '*.md' )
 for s in $SKIP_DIRS; do
   FIND_ARGS+=( ! -path "*/$s/*" )
@@ -129,8 +125,19 @@ while IFS= read -r f; do
           p=index(L,":")
           if (p>0) { list=substr(L,p+1) }
         }
-        gsub(/[][\"']/, "", list)
+
+        # [, ], " を削除
+        gsub(/\[/, "", list)
+        gsub(/\]/, "", list)
+        gsub(/"/, "", list)
+
+        # シングルクォート (ASCII 39) を削除
+        sq = sprintf("%c", 39)
+        gsub(sq, "", list)
+
+        # カンマをスペースに
         gsub(/,/, " ", list)
+
         n2=split(list, arr, /[ \t]+/)
         for (j=1;j<=n2;j++) {
           if (arr[j]!="") tags[tolower(arr[j])] = 1
@@ -186,9 +193,9 @@ fi
   else
     while IFS=$'\t' read -r id base title path; do
       if [ -n "$title" ]; then
-        printf -- "- [[%s]] — (%s)\n" "$base" "$title"
+        printf -- "- [[%s]] — (%s)\n", base, title
       else
-        printf -- "- [[%s]]\n" "$base"
+        printf -- "- [[%s]]\n", base
       fi
     done < "$TMP_FILE"
   fi
