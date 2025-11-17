@@ -30,7 +30,7 @@ TAGS=("$@")
 OUTDIR="$ROOT/dashboards"
 mkdir -p "$OUTDIR"
 
-# ★ 出力ファイル名は固定（VS Code から常にこれを開けばOK）
+# 出力ファイル名は固定（VS Code から常にこれを開けばOK）
 OUTFILE="$OUTDIR/tags_search.md"
 
 NOW="$(date '+%Y-%m-%d %H:%M')"
@@ -52,7 +52,8 @@ EXTRA_SKIPS="${ZK_DASH_SKIP_DIRS:-}"
 SKIP_DIRS="${DEFAULT_SKIPS} ${EXTRA_SKIPS}"
 
 TMP_FILE="$(mktemp "${TMPDIR:-/tmp}/zktags.XXXXXX")"
-trap 'rm -f "$TMP_FILE"' EXIT
+FILELIST="$(mktemp "${TMPDIR:-/tmp}/zktags_list.XXXXXX")"
+trap 'rm -f "$TMP_FILE" "$FILELIST"' EXIT
 
 # find の引数を配列で組み立て（サブフォルダも再帰的に探索）
 FIND_ARGS=( "$ROOT" -type f -name '*.md' )
@@ -60,50 +61,69 @@ for s in $SKIP_DIRS; do
   FIND_ARGS+=( ! -path "*/$s/*" )
 done
 
-find "${FIND_ARGS[@]}" | \
-while IFS= read -r f; do
-  awk -v file="$f" -v wanted="$TAG_STR" '
-  BEGIN{
-    inFM=0
-    id=""
-    title=""
-    basename=""
-    n=split(file, parts, "/")
-    b=parts[n]
-    if (length(b) > 3 && substr(b, length(b)-2) == ".md") {
-      b = substr(b, 1, length(b)-3)
-    }
-    basename = b
+# 対象ファイル一覧を一旦ファイルに出力
+find "${FIND_ARGS[@]}" > "$FILELIST"
 
-    # wanted tags
-    wantCount=0
-    split(wanted, wtmp, ",")
-    for (i in wtmp) {
-      if (wtmp[i] != "") {
-        want[++wantCount] = tolower(wtmp[i])
-      }
+# ===== awk 1回で全ファイル処理 =====
+awk -v wanted="$TAG_STR" '
+function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
+function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
+function trim(s){ return rtrim(ltrim(s)) }
+function key_of(s,    t,p,k){
+  t=ltrim(s); p=index(t,":"); if(p==0) return "";
+  k=trim(substr(t,1,p-1));
+  # 小文字化
+  for(i=1;i<=length(k);i++){
+    c=substr(k,i,1)
+    if(c>="A"&&c<="Z") k=substr(k,1,i-1) "" tolower(c) "" substr(k,i+1)
+  }
+  return k
+}
+
+BEGIN{
+  inFM=0
+  id=""
+  title=""
+  basename=""
+  wantCount=0
+
+  # wanted tags を1回だけ分解
+  split(wanted, wtmp, ",")
+  for (i in wtmp) {
+    if (wtmp[i] != "") {
+      want[++wantCount] = tolower(wtmp[i])
     }
   }
-  function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
-  function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
-  function trim(s){ return rtrim(ltrim(s)) }
-  function key_of(s,    t,p,k){
-    t=ltrim(s); p=index(t,":"); if(p==0) return "";
-    k=trim(substr(t,1,p-1));
-    # 小文字化
-    for(i=1;i<=length(k);i++){
-      c=substr(k,i,1)
-      if(c>="A"&&c<="Z") k=substr(k,1,i-1) "" tolower(c) "" substr(k,i+1)
-    }
-    return k
+}
+
+# FILELIST を1行ずつ読み、そのパスのファイルを処理する
+NR==FNR {
+  file = $0
+  gsub(/\r$/, "", file)   # 念のため CR 除去（Windows 対策）
+  if (file == "") next
+
+  # ===== 1ファイル分の状態初期化 =====
+  inFM    = 0
+  id      = ""
+  title   = ""
+  basename= ""
+  delete tags
+
+  # basename 計算（最後の / の後ろ、.md を外す）
+  n = split(file, parts, "/")
+  b = parts[n]
+  if (length(b) > 3 && substr(b, length(b)-2) == ".md") {
+    b = substr(b, 1, length(b)-3)
   }
-  {
-    line=$0
-    # frontmatter の境界
-    if (trim(line)=="---") { inFM = !inFM; next }
+  basename = b
+
+  # ===== ファイルを1行ずつ読む =====
+  while ((getline line < file) > 0) {
+    # frontmatter の境界 ("---") は前後空白をtrimして判定
+    if (trim(line)=="---") { inFM = !inFM; continue }
 
     if (inFM==1) {
-      k=key_of(line)
+      k = key_of(line)
       if (k=="id" && id=="") {
         p=index(line,":")
         if(p>0){ id=trim(substr(line,p+1)) }
@@ -139,20 +159,24 @@ while IFS= read -r f; do
       }
     }
   }
-  END{
-    if (wantCount==0) exit 0
-    # AND 条件：指定されたタグをすべて持っているか？
-    ok=1
-    for (i=1;i<=wantCount;i++) {
-      t = want[i]
-      if (!(t in tags)) { ok=0; break }
-    }
-    if (ok) {
-      # 出力: id \t basename \t title \t file
-      printf("%s\t%s\t%s\t%s\n", id, basename, title, file)
-    }
-  }' "$f"
-done > "$TMP_FILE"
+  close(file)
+
+  # ===== そのファイルが条件を満たすか判定 =====
+  if (wantCount==0) next
+
+  ok=1
+  for (i=1;i<=wantCount;i++) {
+    t = want[i]
+    if (!(t in tags)) { ok=0; break }
+  }
+  if (ok) {
+    # 出力: id \t basename \t title \t file
+    printf("%s\t%s\t%s\t%s\n", id, basename, title, file)
+  }
+
+  next
+}
+' "$FILELIST" > "$TMP_FILE"
 
 # id でソート（無い場合はそのまま）
 if [ -s "$TMP_FILE" ]; then
