@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
 # make_tag_dashboard.sh
 #
-# frontmatter の due / closed だけを見て、未クローズのノートを due 昇順で一覧化する。
+# frontmatter の due / closed だけを見て、未クローズのノートを一覧化する。
 #
 # - 第1引数 TAG が空   → タグ条件なし（全ノート対象）
-# - 第1引数 TAG が非空 → tags: に TAG を含むノートのみ対象
+# - 第1引数 TAG が非空 → 先頭 frontmatter の tags: に TAG を含むノートのみ対象
 # - 第2引数: 互換用ダミー（現在は未使用。VS Code側の既存設定のために残しているだけ）
 # - 第3引数 ROOT: ルートディレクトリ（省略時はカレント）
 #
 # 対象条件:
-#   - 「先頭の frontmatter ブロック」に due: (YYYY-MM-DD...) がある
-#   - 「先頭の frontmatter ブロック」に closed: が「無い」
-#   - （オプション）frontmatter の tags: に TAG が含まれている
+#   - 先頭 frontmatter に closed: が「無い」こと
+#   - かつ、以下のどちらか
+#       A) 先頭 frontmatter に due: (YYYY-MM-DD...) がある       → 期限付きタスク
+#       B) frontmatter 自体が無い、または due: が無い           → 期限未設定タスク
 #
 # 出力:
 #   - いつでも dashboards/default_dashboard.md に上書き
 #   - 形式:
-#       ## ⏰ 期限切れ
-#       - 2025-11-20 [[2025-11-16_URJの休眠口座をどうにかする]]
-#     のように、「日付 + wikilink」だけを1行で出力（本文の説明は出さない）
+#       ## ⏰ 期限切れ / 📅 今週 / 📆 来週 / 📌 再来週以降
+#       - 2025-11-20 [[ノート名]]
+#       ## 📝 期限未設定
+#       - [[ノート名]]
 
 set -eu
 
@@ -36,9 +38,13 @@ OUT="${OUTDIR}/default_dashboard.md"
 # 今日の日付（YYYY-MM-DD）
 TODAY="$(date '+%Y-%m-%d')"
 
-tmpfile="$(mktemp)"
+# 一時ファイル:
+#   - tmp_due   : due ありのノート (due<TAB>basename)
+#   - tmp_nodue : due なしのノート (basenameのみ)
+tmp_due="$(mktemp)"
+tmp_nodue="$(mktemp)"
 filelist="$(mktemp)"
-trap 'rm -f "$tmpfile" "$filelist"' EXIT
+trap 'rm -f "$tmp_due" "$tmp_nodue" "$filelist"' EXIT
 
 # TAG（awk に渡すフィルタ用）
 if [ -z "${RAW_TAG}" ]; then
@@ -53,10 +59,12 @@ find "${ROOT}" -type f -name '*.md' ! -path "${OUTDIR}/*" > "${filelist}"
 
 # ------------------------------
 # 第1段階: 各ファイルの「先頭 frontmatter だけ」を読み、
-#          「dueあり && closedなし」のノートを tmpfile に
-#          "due<TAB>basename" 形式で出力する
+#          「closedなし & タグ条件OK」のノートを
+#          ・dueあり → tmp_due（due<TAB>basename）
+#          ・dueなし → tmp_nodue（basename）
+#          に振り分ける
 # ------------------------------
-awk -v tag="${TAG}" '
+awk -v tag="${TAG}" -v out_due="${tmp_due}" -v out_nodue="${tmp_nodue}" '
 function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
 function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
 function trim(s){ return rtrim(ltrim(s)) }
@@ -154,29 +162,37 @@ NR==FNR {
   # ===== そのファイルの判定 & 出力 =====
   # 条件:
   #   - hasTag      : タグ条件を満たしている（またはタグ無条件）
-  #   - hasDue      : frontmatter に due: があり、かつ YYYY-MM-DD 形式
   #   - !isClosed   : frontmatter に closed: が無い
-  if (hasTag && hasDue && !isClosed) {
-    # due \t basename を tmpfile に書き出す
-    printf("%s\t%s\n", dueVal, basename)
+  #
+  # かつ、
+  #   - hasDue==1                 → 期限付き → out_due に書き出す
+  #   - hasDue==0                 → 期限未設定 → out_nodue に書き出す
+  #     （frontmatterが無い or frontmatterにdue:が無い）
+  if (hasTag && !isClosed) {
+    if (hasDue) {
+      # due あり: due \t basename
+      printf("%s\t%s\n", dueVal, basename) >> out_due
+    } else {
+      # due なし: basename のみ
+      printf("%s\n", basename) >> out_nodue
+    }
   }
 
   next
 }
-' "${filelist}" > "${tmpfile}"
+' "${filelist}"
 
 # ------------------------------
-# 第2段階: tmpfile を due 昇順にソートし、
-#          「期限切れ / 今週 / 来週 / 再来週以降」に振り分けて Markdown 出力
+# 第2段階: tmp_due / tmp_nodue を使って Markdown 出力
 # ------------------------------
 
 # 見出し用ラベル
 if [ -z "${TAG}" ]; then
   HEADER_LABEL="All Tags"
-  CONDITION_TEXT="先頭 frontmatter に due: (YYYY-MM-DD) があり、closed: が無いノート（タグ条件なし）"
+  CONDITION_TEXT="先頭 frontmatter に closed: が無いノート（due: が無ければ期限未設定扱い）"
 else
   HEADER_LABEL="Tag: ${TAG}"
-  CONDITION_TEXT="先頭 frontmatter の tags に「${TAG}」を含み、due: (YYYY-MM-DD) があり、closed: が無いノート"
+  CONDITION_TEXT="先頭 frontmatter の tags に「${TAG}」を含み、closed: が無いノート（due: が無ければ期限未設定扱い）"
 fi
 
 {
@@ -186,76 +202,91 @@ fi
   echo "- 条件: ${CONDITION_TEXT}"
   echo
 
-  if [ ! -s "${tmpfile}" ]; then
+  if [ ! -s "${tmp_due}" ] && [ ! -s "${tmp_nodue}" ]; then
     echo "> 該当なし"
   else
-    sort "${tmpfile}" | awk -F '\t' -v today="${TODAY}" '
-    function ymd_to_jdn(s,    Y,M,D,a,y,m) {
-      if (s == "" || length(s) < 10) return 0
-      Y = substr(s,1,4) + 0
-      M = substr(s,6,2) + 0
-      D = substr(s,9,2) + 0
-      a = int((14 - M)/12)
-      y = Y + 4800 - a
-      m = M + 12*a - 3
-      return D + int((153*m + 2)/5) + 365*y + int(y/4) - int(y/100) + int(y/400) - 32045
-    }
-    BEGIN {
-      todayJ = ymd_to_jdn(today)
-      oN=tN=nN=lN=0
-    }
-    {
-      due  = $1
-      base = $2
+    # ---------- 期限付き ----------
+    if [ -s "${tmp_due}" ]; then
+      sort "${tmp_due}" | awk -F '\t' -v today="${TODAY}" '
+      function ymd_to_jdn(s,    Y,M,D,a,y,m) {
+        if (s == "" || length(s) < 10) return 0
+        Y = substr(s,1,4) + 0
+        M = substr(s,6,2) + 0
+        D = substr(s,9,2) + 0
+        a = int((14 - M)/12)
+        y = Y + 4800 - a
+        m = M + 12*a - 3
+        return D + int((153*m + 2)/5) + 365*y + int(y/4) - int(y/100) + int(y/400) - 32045
+      }
+      BEGIN {
+        todayJ = ymd_to_jdn(today)
+        oN=tN=nN=lN=0
+      }
+      {
+        due  = $1
+        base = $2
 
-      if (due !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}/) next
+        if (due !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}/) next
 
-      dJ = ymd_to_jdn(substr(due,1,10))
-      diff = dJ - todayJ
+        dJ = ymd_to_jdn(substr(due,1,10))
+        diff = dJ - todayJ
 
-      if (dJ == 0) {
-        bucket = "later"   # フォーマット異常時はとりあえず「再来週以降」へ
-      } else if (diff < 0) {
-        bucket = "over"
-      } else if (diff <= 6) {
-        bucket = "this"
-      } else if (diff <= 13) {
-        bucket = "next"
-      } else {
-        bucket = "later"
-      }
+        if (dJ == 0) {
+          bucket = "later"   # フォーマット異常時はとりあえず「再来週以降」へ
+        } else if (diff < 0) {
+          bucket = "over"
+        } else if (diff <= 6) {
+          bucket = "this"
+        } else if (diff <= 13) {
+          bucket = "next"
+        } else {
+          bucket = "later"
+        }
 
-      if (bucket=="over")      {oN++; o_due[oN]=due;  o_base[oN]=base}
-      else if (bucket=="this"){tN++; t_due[tN]=due;  t_base[tN]=base}
-      else if (bucket=="next"){nN++; n_due[nN]=due;  n_base[nN]=base}
-      else                    {lN++; l_due[lN]=due;  l_base[lN]=base}
-    }
-    END {
-      if (oN>0) {
-        print "## ⏰ 期限切れ"
-        print ""
-        for (i=1;i<=oN;i++) print "- " o_due[i] " [[" o_base[i] "]]"
-        print ""
+        if (bucket=="over")      {oN++; o_due[oN]=due;  o_base[oN]=base}
+        else if (bucket=="this"){tN++; t_due[tN]=due;  t_base[tN]=base}
+        else if (bucket=="next"){nN++; n_due[nN]=due;  n_base[nN]=base}
+        else                    {lN++; l_due[lN]=due;  l_base[lN]=base}
       }
-      if (tN>0) {
-        print "## 📅 今週"
-        print ""
-        for (i=1;i<=tN;i++) print "- " t_due[i] " [[" t_base[i] "]]"
-        print ""
-      }
-      if (nN>0) {
-        print "## 📆 来週"
-        print ""
-        for (i=1;i<=nN;i++) print "- " n_due[i] " [[" n_base[i] "]]"
-        print ""
-      }
-      if (lN>0) {
-        print "## 📌 再来週以降"
-        print ""
-        for (i=1;i<=lN;i++) print "- " l_due[i] " [[" l_base[i] "]]"
-        print ""
-      }
-    }'
+      END {
+        if (oN>0) {
+          print "## ⏰ 期限切れ"
+          print ""
+          for (i=1;i<=oN;i++) print "- " o_due[i] " [[" o_base[i] "]]"
+          print ""
+        }
+        if (tN>0) {
+          print "## 📅 今週"
+          print ""
+          for (i=1;i<=tN;i++) print "- " t_due[i] " [[" t_base[i] "]]"
+          print ""
+        }
+        if (nN>0) {
+          print "## 📆 来週"
+          print ""
+          for (i=1;i<=nN;i++) print "- " n_due[i] " [[" n_base[i] "]]"
+          print ""
+        }
+        if (lN>0) {
+          print "## 📌 再来週以降"
+          print ""
+          for (i=1;i<=lN;i++) print "- " l_due[i] " [[" l_base[i] "]]"
+          print ""
+        }
+      }'
+    fi
+
+    # ---------- 期限未設定 ----------
+    if [ -s "${tmp_nodue}" ]; then
+      echo "## 📝 期限未設定"
+      echo
+      # 名前順に並べておくと安定して見やすいので sort して出力
+      sort "${tmp_nodue}" | while IFS= read -r base; do
+        [ -z "${base}" ] && continue
+        echo "- [[${base}]]"
+      done
+      echo
+    fi
   fi
 } > "${OUT}"
 
