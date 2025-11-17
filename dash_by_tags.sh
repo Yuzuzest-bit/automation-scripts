@@ -8,6 +8,10 @@
 # - ルートディレクトリはこの .sh が置かれているフォルダ
 # - その配下のサブフォルダを find で再帰的に探索
 # - dashboards/tags_search.md に毎回上書き出力
+# - 並び順:
+#     ZK_TAG_SORT=asc  (デフォルト) ... id 昇順（古い順）
+#     ZK_TAG_SORT=desc             ... id 降順（新しい順）
+#     ZK_TAG_SORT=none             ... ソートなし（find 順）
 
 set -euo pipefail
 
@@ -129,7 +133,7 @@ while IFS= read -r f; do
         }
       }
     } else {
-      # 本文側、最初の "# " 行をタイトルとして拾う
+      # 本文側、最初の "# " 行をタイトルとして拾う（今は使っていないが保持）
       if (title=="" && index(line, "# ")==1) {
         title=substr(line,3)
       }
@@ -152,7 +156,20 @@ done > "$TMP_FILE"
 
 # id でソート（無い場合はそのまま）
 if [ -s "$TMP_FILE" ]; then
-  sort -t $'\t' -k1,1 "$TMP_FILE" -o "$TMP_FILE"
+  case "${ZK_TAG_SORT:-asc}" in
+    desc)
+      # 新しい順（id 降順）
+      sort -t $'\t' -k1,1r "$TMP_FILE" -o "$TMP_FILE"
+      ;;
+    none)
+      # ソートしない（find の順のまま）
+      :
+      ;;
+    *)
+      # デフォルト: 古い順（id 昇順）
+      sort -t $'\t' -k1,1 "$TMP_FILE" -o "$TMP_FILE"
+      ;;
+  esac
 fi
 
 {
@@ -177,11 +194,8 @@ fi
     printf "> 該当なし\n"
   else
     while IFS=$'\t' read -r id base title path; do
-      if [ -n "$title" ]; then
-        printf -- "- [[%s]] (%s)\n" "$base" "$title"
-      else
-        printf -- "- [[%s]]\n" "$base"
-      fi
+      # タイトル表示はやめて、wikilink だけを出力
+      printf -- "- [[%s]]\n" "$base"
     done < "$TMP_FILE"
   fi
 } > "$OUTFILE"
