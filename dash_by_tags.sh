@@ -92,12 +92,7 @@ while IFS= read -r f; do
   function key_of(s,    t,p,k){
     t=ltrim(s); p=index(t,":"); if(p==0) return "";
     k=trim(substr(t,1,p-1));
-    # strip quotes
-    if ((substr(k,1,1)=="\"" && substr(k,length(k),1)=="\"")
-        || (substr(k,1,1)=="\047" && substr(k,length(k),1)=="\047")) {
-      k=substr(k,2,length(k)-2);
-    }
-    # lowercase
+    # 小文字化
     for(i=1;i<=length(k);i++){
       c=substr(k,i,1)
       if(c>="A"&&c<="Z") k=substr(k,1,i-1) "" tolower(c) "" substr(k,i+1)
@@ -130,10 +125,6 @@ while IFS= read -r f; do
         gsub(/\[/, "", list)
         gsub(/\]/, "", list)
         gsub(/"/, "", list)
-
-        # シングルクォート (ASCII 39) を削除
-        sq = sprintf("%c", 39)
-        gsub(sq, "", list)
 
         # カンマをスペースに
         gsub(/,/, " ", list)
@@ -193,9 +184,9 @@ fi
   else
     while IFS=$'\t' read -r id base title path; do
       if [ -n "$title" ]; then
-        printf -- "- [[%s]] — (%s)\n", base, title
+        printf -- "- [[%s]] (%s)\n" "$base" "$title"
       else
-        printf -- "- [[%s]]\n", base
+        printf -- "- [[%s]]\n" "$base"
       fi
     done < "$TMP_FILE"
   fi
