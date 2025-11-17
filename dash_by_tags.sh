@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# dash_by_tags.sh <ROOT_DIR> <tag1> [tag2 ...]
+# frontmatter tags: に指定されたタグ群をもとに、
+# 指定したタグをすべて含むノートのダッシュボードを作成する
+# macOS(Homebrew bash) / Windows Git Bash 想定
+
+set -euo pipefail
+
+ROOT_ARG="${1:-}"
+if [[ -z "$ROOT_ARG" ]]; then
+  echo "usage: $0 <ROOT_DIR> <tag1> [tag2 ...]" >&2
+  exit 2
+fi
+ROOT="$ROOT_ARG"
+shift
+
+if [[ ! -d "$ROOT" ]]; then
+  echo "Not a directory: $ROOT" >&2
+  exit 1
+fi
+
+if [[ "$#" -lt 1 ]]; then
+  echo "need at least one tag" >&2
+  exit 2
+fi
+
+# 引数でもらったタグ（大文字小文字は AWK 側で吸収）
+TAGS=("$@")
+
+OUTDIR="$ROOT/dashboards"
+mkdir -p "$OUTDIR"
+
+# 出力ファイル名: tags_tag1_tag2.md
+outname="tags"
+for t in "${TAGS[@]}"; do
+  # 念のためスペースは - に置き換え
+  tmp="${t// /-}"
+  outname="${outname}_${tmp}"
+done
+OUTFILE="$OUTDIR/${outname}.md"
+
+NOW="$(date '+%Y-%m-%d %H:%M')"
+export LC_ALL=C
+
+# タグリスト "tag1,tag2,..." にして AWK に渡す
+TAG_STR=""
+for t in "${TAGS[@]}"; do
+  if [[ -z "$TAG_STR" ]]; then
+    TAG_STR="$t"
+  else
+    TAG_STR="$TAG_STR,$t"
+  fi
+done
+
+# 除外ディレクトリ（zk_make_dashboards.sh と同じ感じ）
+DEFAULT_SKIPS=".git .vscode .obsidian .foam node_modules templates template dashboards"
+EXTRA_SKIPS="${ZK_DASH_SKIP_DIRS:-}"
+SKIP_DIRS="${DEFAULT_SKIPS} ${EXTRA_SKIPS}"
+
+TMP_FILE="$(mktemp "${TMPDIR:-/tmp}/zktags.XXXXXX")"
+trap 'rm -f "$TMP_FILE"' EXIT
+
+# find の引数を配列で組み立て
+FIND_ARGS=( "$ROOT" -type f -name '*.md' )
+for s in $SKIP_DIRS; do
+  FIND_ARGS+=( ! -path "*/$s/*" )
+done
+
+find "${FIND_ARGS[@]}" | \
+while IFS= read -r f; do
+  awk -v file="$f" -v wanted="$TAG_STR" '
+  BEGIN{
+    inFM=0
+    id=""
+    title=""
+    basename=""
+    n=split(file, parts, "/")
+    b=parts[n]
+    if (length(b) > 3 && substr(b, length(b)-2) == ".md") {
+      b = substr(b, 1, length(b)-3)
+    }
+    basename = b
+
+    # wanted tags
+    wantCount=0
+    split(wanted, wtmp, ",")
+    for (i in wtmp) {
+      if (wtmp[i] != "") {
+        want[++wantCount] = tolower(wtmp[i])
+      }
+    }
+  }
+  function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
+  function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
+  function trim(s){ return rtrim(ltrim(s)) }
+  function key_of(s,    t,p,k){
+    t=ltrim(s); p=index(t,":"); if(p==0) return "";
+    k=trim(substr(t,1,p-1));
+    # strip quotes
+    if ((substr(k,1,1)=="\"" && substr(k,length(k),1)=="\"")
+        || (substr(k,1,1)=="\047" && substr(k,length(k),1)=="\047")) {
+      k=substr(k,2,length(k)-2);
+    }
+    # lowercase
+    for(i=1;i<=length(k);i++){
+      c=substr(k,i,1)
+      if(c>="A"&&c<="Z") k=substr(k,1,i-1) "" tolower(c) "" substr(k,i+1)
+    }
+    return k
+  }
+  {
+    line=$0
+    # frontmatter の境界
+    if (trim(line)=="---") { inFM = !inFM; next }
+
+    if (inFM==1) {
+      k=key_of(line)
+      if (k=="id" && id=="") {
+        p=index(line,":")
+        if(p>0){ id=trim(substr(line,p+1)) }
+      } else if (k=="tags") {
+        # 1 行で tags: [ ... ] と書かれている前提（多少はゆるく見る）
+        L=tolower(line)
+        list=""
+        s=index(L,"["); e=index(L,"]")
+        if (s>0 && e>s) {
+          list=substr(L,s+1,e-s-1)
+        } else {
+          p=index(L,":")
+          if (p>0) { list=substr(L,p+1) }
+        }
+        gsub(/[][\"']/, "", list)
+        gsub(/,/, " ", list)
+        n2=split(list, arr, /[ \t]+/)
+        for (j=1;j<=n2;j++) {
+          if (arr[j]!="") tags[tolower(arr[j])] = 1
+        }
+      }
+    } else {
+      # 本文側、最初の "# " 行をタイトルとして拾う
+      if (title=="" && index(line, "# ")==1) {
+        title=substr(line,3)
+      }
+    }
+  }
+  END{
+    if (wantCount==0) exit 0
+    # AND 条件：指定されたタグをすべて持っているか？
+    ok=1
+    for (i=1;i<=wantCount;i++) {
+      t = want[i]
+      if (!(t in tags)) { ok=0; break }
+    }
+    if (ok) {
+      # 出力: id \t basename \t title \t file
+      printf("%s\t%s\t%s\t%s\n", id, basename, title, file)
+    }
+  }' "$f"
+done > "$TMP_FILE"
+
+# id でソート（無い場合はそのまま）
+if [ -s "$TMP_FILE" ]; then
+  sort -t $'\t' -k1,1 "$TMP_FILE" -o "$TMP_FILE"
+fi
+
+{
+  printf "# Tag Dashboard: "
+  first=1
+  IFS=',' read -r -a disp <<< "$TAG_STR"
+  for idx in "${!disp[@]}"; do
+    t="${disp[$idx]}"
+    [ -z "$t" ] && continue
+    if [ $first -eq 0 ]; then
+      printf " + "
+    fi
+    printf "%s", "$t"
+    first=0
+  done
+  printf "\n\n"
+
+  printf -- "- 生成時刻: %s\n" "$NOW"
+  printf -- "- ROOT: %s\n\n" "$ROOT"
+
+  if [ ! -s "$TMP_FILE" ]; then
+    printf "> 該当なし\n"
+  else
+    while IFS=$'\t' read -r id base title path; do
+      if [ -n "$title" ]; then
+        printf -- "- [[%s]] — (%s)\n" "$base" "$title"
+      else
+        printf -- "- [[%s]]\n" "$base"
+      fi
+    done < "$TMP_FILE"
+  fi
+} > "$OUTFILE"
+
+echo "[OK] Wrote $OUTFILE"
