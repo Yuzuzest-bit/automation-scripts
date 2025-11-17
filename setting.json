@@ -1,1 +1,1 @@
-"search_tag" : "¥"C:/Program Files/Git/git-bash.exe¥" -lc ¥"/C/work/dev/aaaaaaaaa/dash_by_tags.sh design && code -r ¥¥¥"/C/work/dev/aaaaaaaaa/dashboards/tags_search.md¥¥¥"¥"",
+"search_tag_newest" : "¥"C:/Program Files/Git/git-bash.exe¥" -lc ¥"export ZK_TAG_SORT=desc; /C/work/dev/aaaaa/dash_by_tags.sh zk-fleeting daily && code -r ¥¥¥"/C/work/dev/aaaaa/dashboards/tags_search.md¥¥¥"¥"",
