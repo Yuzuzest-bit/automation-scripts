@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # zk_priority.sh <file> [priority]
-# frontmatter に priority: を追加 / 更新する。
+# frontmatter に priority: を追加 / 更新する（Python 不要版）。
 #  - priority 省略時          → 3 (低)
 #  - 1 / high / p1 など       → 1 (高)
 #  - 2 / mid / p2 など        → 2 (中)
@@ -22,83 +22,88 @@ if [[ ! -f "${FILE}" ]]; then
   exit 2
 fi
 
-PRIORITY="${2:-3}"
+RAW="${2:-3}"
 
-python3 - "$FILE" "$PRIORITY" << 'PY'
-import sys, re, pathlib
+# --- 引数 priority を 1/2/3 に正規化 ---
+# Git Bash の bash なら ${var,,} で小文字化OK
+RAW_LC="${RAW,,}"
 
-path = pathlib.Path(sys.argv[1])
-raw = sys.argv[2] if len(sys.argv) > 2 else "3"
+case "${RAW_LC}" in
+  1|p1|high|h)
+    PRI="1"
+    ;;
+  2|p2|mid|medium|m)
+    PRI="2"
+    ;;
+  3|p3|low|l|"")
+    PRI="3"
+    ;;
+  *)
+    PRI="3"
+    ;;
+esac
 
-# 引数を 1 / 2 / 3 に正規化
-s = raw.strip().lower()
-if s in ("1", "p1", "high", "h"):
-    pri = "1"
-elif s in ("2", "p2", "mid", "medium", "m"):
-    pri = "2"
-elif s in ("3", "p3", "low", "l"):
-    pri = "3"
-else:
-    # 不明な指定は低優先度 (3)
-    pri = "3"
+# 先頭行を見て frontmatter 有無を判定
+first_line="$(head -n 1 "${FILE}" | tr -d '\r')"
 
-try:
-    text = path.read_text(encoding="utf-8")
-except FileNotFoundError:
-    sys.exit(1)
+tmp="$(mktemp)"
 
-lines = text.splitlines()
+if [[ "${first_line}" != '---' ]]; then
+  # frontmatter が無い → 先頭に priority だけ入った frontmatter を作成
+  {
+    printf '%s\n' '---'
+    printf 'priority: %s\n' "${PRI}"
+    printf '%s\n' '---'
+    cat "${FILE}"
+  } > "${tmp}"
+else
+  # frontmatter あり → priority を更新 or 挿入
+  awk -v pri="${PRI}" '
+  BEGIN {
+    inFM = 0
+    done = 0
+    replaced = 0
+    inserted = 0
+  }
 
-# 空ファイルなら frontmatter を新規作成
-if not lines:
-    fm = ["---", f"priority: {pri}", "---", ""]
-    path.write_text("\n".join(fm), encoding="utf-8")
-    sys.exit(0)
+  # 1行目の --- で frontmatter 開始
+  NR == 1 && $0 ~ /^---[ \t]*$/ {
+    inFM = 1
+    print
+    next
+  }
 
-# frontmatter 検出
-if lines[0].strip() != "---":
-    # frontmatter が無い → 先頭に作成
-    fm = ["---", f"priority: {pri}", "---", ""]
-    new_text = "\n".join(fm + lines)
-    # 元が改行で終わっていたら維持
-    if text.endswith("\n") and not new_text.endswith("\n"):
-        new_text += "\n"
-    path.write_text(new_text, encoding="utf-8")
-    sys.exit(0)
+  {
+    line = $0
 
-close_idx = None
-priority_idx = None
-for i in range(1, len(lines)):
-    if lines[i].strip() == "---":
-        close_idx = i
-        break
-    if priority_idx is None and lines[i].lstrip().startswith("priority:"):
-        priority_idx = i
+    # frontmatter 内で閉じ --- に到達
+    if (inFM && line ~ /^---[ \t]*$/) {
+      if (!replaced && !inserted) {
+        # priority: がまだ無ければここで挿入
+        print "priority: " pri
+        inserted = 1
+      }
+      inFM = 0
+      done = 1
+      print line
+      next
+    }
 
-if close_idx is None:
-    # 変な frontmatter 構造 → 何もしない
-    sys.exit(0)
+    if (inFM) {
+      # priority: 行があれば置き換え
+      if (match(line, /^([ \t]*)priority[ \t]*:/, m)) {
+        indent = m[1]
+        print indent "priority: " pri
+        replaced = 1
+        next
+      }
+    }
 
-if priority_idx is None:
-    # priority 行が無い → 閉じ --- の直前に挿入
-    indent = ""
-    # 他のキーのインデントを参考にしたければここで探してもよいが、
-    # とりあえずインデント無しで書く
-    new_line = f"{indent}priority: {pri}"
-    lines.insert(close_idx, new_line)
-else:
-    line = lines[priority_idx]
-    m = re.match(r'^(?P<indent>\s*)priority\s*:\s*(?P<value>.*)$', line)
-    if m:
-        indent = m.group("indent")
-    else:
-        indent = ""
-    # priority 行を書き換え
-    lines[priority_idx] = f"{indent}priority: {pri}"
+    print line
+  }
+  ' "${FILE}" > "${tmp}"
+fi
 
-new_text = "\n".join(lines)
-# 元が改行で終わっていたら維持する
-if text.endswith("\n") and not new_text.endswith("\n"):
-    new_text += "\n"
-path.write_text(new_text, encoding="utf-8")
-PY
+mv "${tmp}" "${FILE}"
+
+echo "[INFO] priority: ${PRI} set on ${FILE}"
