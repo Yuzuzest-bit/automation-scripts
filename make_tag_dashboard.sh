@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # make_tag_dashboard.sh
 #
-# frontmatter の due / closed だけを見て、未クローズのノートを一覧化する。
+# frontmatter の due / closed / priority だけを見て、未クローズのノートを一覧化する。
 #
 # - 第1引数 TAG が空   → タグ条件なし（全ノート対象）
 # - 第1引数 TAG が非空 → 先頭 frontmatter の tags: に TAG を含むノートのみ対象
@@ -14,13 +14,20 @@
 #       A) 先頭 frontmatter に due: (YYYY-MM-DD...) がある       → 期限付きタスク
 #       B) frontmatter 自体が無い、または due: が無い           → 期限未設定タスク
 #
+# priority:
+#   - frontmatter の priority: を読む（任意）
+#     - 1 / high / p1    → P1（高）
+#     - 2 / mid / p2     → P2（中）
+#     - 3 / low / p3     → P3（低）
+#     - 未指定 or 不明   → P3（低）扱い
+#
 # 出力:
 #   - いつでも dashboards/default_dashboard.md に上書き
 #   - 形式:
 #       ## ⏰ 期限切れ / 📅 今週 / 📆 来週 / 📌 再来週以降
-#       - 2025-11-20 [[ノート名]]
+#       - 2025-11-20 🔴[P1] [[ノート名]]
 #       ## 📝 期限未設定
-#       - [[ノート名]]
+#       - 🟢[P3] [[ノート名]]
 
 set -eu
 
@@ -39,8 +46,8 @@ OUT="${OUTDIR}/default_dashboard.md"
 TODAY="$(date '+%Y-%m-%d')"
 
 # 一時ファイル:
-#   - tmp_due   : due ありのノート (due<TAB>basename)
-#   - tmp_nodue : due なしのノート (basenameのみ)
+#   - tmp_due   : due ありのノート (due<TAB>priority<TAB>basename)
+#   - tmp_nodue : due なしのノート (priority<TAB>basename)
 tmp_due="$(mktemp)"
 tmp_nodue="$(mktemp)"
 filelist="$(mktemp)"
@@ -60,8 +67,8 @@ find "${ROOT}" -type f -name '*.md' ! -path "${OUTDIR}/*" > "${filelist}"
 # ------------------------------
 # 第1段階: 各ファイルの「先頭 frontmatter だけ」を読み、
 #          「closedなし & タグ条件OK」のノートを
-#          ・dueあり → tmp_due（due<TAB>basename）
-#          ・dueなし → tmp_nodue（basename）
+#          ・dueあり → tmp_due（due<TAB>priority<TAB>basename）
+#          ・dueなし → tmp_nodue（priority<TAB>basename）
 #          に振り分ける
 # ------------------------------
 awk -v tag="${TAG}" -v out_due="${tmp_due}" -v out_nodue="${tmp_nodue}" '
@@ -83,6 +90,7 @@ NR==FNR {
   isClosed = 0
   dueVal   = ""
   basename = ""
+  priVal   = 3    # ★ デフォルト優先度 = 3 (低, P3)
 
   # ベース名取得（最後の / の後ろ、.md を削る）
   n = split(file, parts, "/")
@@ -116,9 +124,9 @@ NR==FNR {
 
     # ---- frontmatter 内だけを見る ----
     if (inFM == 1) {
-      # FM 内の処理: tags / due / closed を拾う
+      # FM 内の処理: tags / due / closed / priority を拾う
       low = line
-      # 小文字化（tolower がない awk 向けに手動）
+      # 小文字化（tolower がない awk 向けに手動風だが、実体は tolower を使う）
       for (i = 1; i <= length(low); i++) {
         c = substr(low, i, 1)
         if (c >= "A" && c <= "Z") {
@@ -153,6 +161,27 @@ NR==FNR {
       if (index(copy, "closed:") > 0) {
         isClosed = 1
       }
+
+      # priority: 行を取得
+      if (index(low, "priority:") > 0) {
+        p = index(low, "priority:")
+        if (p > 0) {
+          tmp = trim(substr(low, p + 9))
+          sub(/^#/, "", tmp)   # 仮に "# high" などがあっても "#" を除去
+          tmp = trim(tmp)
+
+          # tmp はすでに小文字化済み想定
+          if (tmp ~ /^1/ || tmp ~ /^high/ || tmp ~ /^p1/) {
+            priVal = 1
+          } else if (tmp ~ /^2/ || tmp ~ /^mid/ || tmp ~ /^medium/ || tmp ~ /^p2/) {
+            priVal = 2
+          } else if (tmp ~ /^3/ || tmp ~ /^low/ || tmp ~ /^p3/) {
+            priVal = 3
+          } else {
+            # それ以外はデフォルト(3)のまま
+          }
+        }
+      }
     }
 
     # inFM==0（本文）は完全に無視する
@@ -170,11 +199,11 @@ NR==FNR {
   #     （frontmatterが無い or frontmatterにdue:が無い）
   if (hasTag && !isClosed) {
     if (hasDue) {
-      # due あり: due \t basename
-      printf("%s\t%s\n", dueVal, basename) >> out_due
+      # due あり: due \t priVal \t basename
+      printf("%s\t%d\t%s\n", dueVal, priVal, basename) >> out_due
     } else {
-      # due なし: basename のみ
-      printf("%s\n", basename) >> out_nodue
+      # due なし: priVal \t basename
+      printf("%d\t%s\n", priVal, basename) >> out_nodue
     }
   }
 
@@ -200,6 +229,7 @@ fi
   echo
   echo "- 生成時刻: $(date '+%Y-%m-%d %H:%M')"
   echo "- 条件: ${CONDITION_TEXT}"
+  echo "- priority: 1(高, 🔴) / 2(中, 🟠) / 3(低, 🟢), 未指定は P3(低) 扱い"
   echo
 
   if [ ! -s "${tmp_due}" ] && [ ! -s "${tmp_nodue}" ]; then
@@ -218,13 +248,20 @@ fi
         m = M + 12*a - 3
         return D + int((153*m + 2)/5) + 365*y + int(y/4) - int(y/100) + int(y/400) - 32045
       }
+      function pri_label(p) {
+        if (p <= 1)      return "🔴[P1]"
+        else if (p == 2) return "🟠[P2]"
+        else if (p >= 3) return "🟢[P3]"
+        else             return "[P?]"
+      }
       BEGIN {
         todayJ = ymd_to_jdn(today)
         oN=tN=nN=lN=0
       }
       {
         due  = $1
-        base = $2
+        pri  = $2 + 0
+        base = $3
 
         if (due !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}/) next
 
@@ -243,34 +280,34 @@ fi
           bucket = "later"
         }
 
-        if (bucket=="over")      {oN++; o_due[oN]=due;  o_base[oN]=base}
-        else if (bucket=="this"){tN++; t_due[tN]=due;  t_base[tN]=base}
-        else if (bucket=="next"){nN++; n_due[nN]=due;  n_base[nN]=base}
-        else                    {lN++; l_due[lN]=due;  l_base[lN]=base}
+        if (bucket=="over")      {oN++; o_due[oN]=due;  o_base[oN]=base; o_pri[oN]=pri}
+        else if (bucket=="this"){tN++; t_due[tN]=due;  t_base[tN]=base; t_pri[tN]=pri}
+        else if (bucket=="next"){nN++; n_due[nN]=due;  n_base[nN]=base; n_pri[nN]=pri}
+        else                    {lN++; l_due[lN]=due;  l_base[lN]=base; l_pri[lN]=pri}
       }
       END {
         if (oN>0) {
           print "## ⏰ 期限切れ"
           print ""
-          for (i=1;i<=oN;i++) print "- " o_due[i] " [[" o_base[i] "]]"
+          for (i=1;i<=oN;i++) print "- " o_due[i] " " pri_label(o_pri[i]) " [[" o_base[i] "]]"
           print ""
         }
         if (tN>0) {
           print "## 📅 今週"
           print ""
-          for (i=1;i<=tN;i++) print "- " t_due[i] " [[" t_base[i] "]]"
+          for (i=1;i<=tN;i++) print "- " t_due[i] " " pri_label(t_pri[i]) " [[" t_base[i] "]]"
           print ""
         }
         if (nN>0) {
           print "## 📆 来週"
           print ""
-          for (i=1;i<=nN;i++) print "- " n_due[i] " [[" n_base[i] "]]"
+          for (i=1;i<=nN;i++) print "- " n_due[i] " " pri_label(n_pri[i]) " [[" n_base[i] "]]"
           print ""
         }
         if (lN>0) {
           print "## 📌 再来週以降"
           print ""
-          for (i=1;i<=lN;i++) print "- " l_due[i] " [[" l_base[i] "]]"
+          for (i=1;i<=lN;i++) print "- " l_due[i] " " pri_label(l_pri[i]) " [[" l_base[i] "]]"
           print ""
         }
       }'
@@ -280,10 +317,16 @@ fi
     if [ -s "${tmp_nodue}" ]; then
       echo "## 📝 期限未設定"
       echo
-      # 名前順に並べておくと安定して見やすいので sort して出力
-      sort "${tmp_nodue}" | while IFS= read -r base; do
+      # priority, basename 形式なので、basename で安定ソート
+      sort -k2,2 "${tmp_nodue}" | while IFS=$'\t' read -r pri base; do
         [ -z "${base}" ] && continue
-        echo "- [[${base}]]"
+        case "${pri}" in
+          1) label="🔴[P1]" ;;
+          2) label="🟠[P2]" ;;
+          3|"") label="🟢[P3]" ;;  # 未指定も P3 扱い
+          *) label="[P?]" ;;
+        esac
+        echo "- ${label} [[${base}]]"
       done
       echo
     fi
