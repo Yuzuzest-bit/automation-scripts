@@ -1,2 +1,18 @@
-"due_dashboards:default-open": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaa/make_tag_dashboard.sh \\\"\\\" \\\"ignored\\\" /C/work/dev/aaaaa && code -r \\\"/C/work/dev/aaaaa/dashboards/default_dashboard.md\\\"\"",
-"due_dashboards:nwsp-open": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaa/make_tag_dashboard.sh nwsp \\\"ignored\\\" /C/work/dev/aaaaa && code -r \\\"/C/work/dev/aaaaa/dashboards/default_dashboard.md\\\"\"",
+{
+  // 既存：
+  "command-runner.commands": {
+    "due_dashboards:default-open": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaa/make_tag_dashboard.sh \\\"\\\" \\\"ignored\\\" /C/work/dev/aaaaa && code -r \\\"/C/work/dev/aaaaa/dashboards/default_dashboard.md\\\"\"",
+    "due_dashboards:nwsp-open": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaa/make_tag_dashboard.sh nwsp \\\"ignored\\\" /C/work/dev/aaaaa && code -r \\\"/C/work/dev/aaaaa/dashboards/default_dashboard.md\\\"\"",
+
+    // ▼ここから追加分▼
+
+    // 今開いているファイルを priority: 1 (高, 🔴) にする
+    "zk:priority-high": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaa/zk_priority.sh \\\"${file}\\\" 1\"",
+
+    // 今開いているファイルを priority: 2 (中, 🟠) にする
+    "zk:priority-mid": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaa/zk_priority.sh \\\"${file}\\\" 2\"",
+
+    // 今開いているファイルを priority: 3 (低, 🟢) にする
+    "zk:priority-low": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaa/zk_priority.sh \\\"${file}\\\" 3\""
+  }
+}
