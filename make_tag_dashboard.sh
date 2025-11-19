@@ -16,18 +16,18 @@
 #
 # priority:
 #   - frontmatter の priority: を読む（任意）
-#     - 1 / high / p1    → P1（高）
-#     - 2 / mid / p2     → P2（中）
-#     - 3 / low / p3     → P3（低）
-#     - 未指定 or 不明   → P3（低）扱い
+#     - 1 / high / p1    → 高 (🔴)
+#     - 2 / mid / p2     → 中 (🟠)
+#     - 3 / low / p3     → 低 (🟢)
+#     - 未指定 or 不明   → 低 (🟢, P3) 扱い
 #
 # 出力:
 #   - いつでも dashboards/default_dashboard.md に上書き
 #   - 形式:
 #       ## ⏰ 期限切れ / 📅 今週 / 📆 来週 / 📌 再来週以降
-#       - 2025-11-20 🔴[P1] [[ノート名]]
+#       - 2025-11-20 🔴 [[ノート名]]
 #       ## 📝 期限未設定
-#       - 🟢[P3] [[ノート名]]
+#       - 🟢 [[ノート名]]
 
 set -eu
 
@@ -126,7 +126,7 @@ NR==FNR {
     if (inFM == 1) {
       # FM 内の処理: tags / due / closed / priority を拾う
       low = line
-      # 小文字化（tolower がない awk 向けに手動風だが、実体は tolower を使う）
+      # 小文字化
       for (i = 1; i <= length(low); i++) {
         c = substr(low, i, 1)
         if (c >= "A" && c <= "Z") {
@@ -229,7 +229,7 @@ fi
   echo
   echo "- 生成時刻: $(date '+%Y-%m-%d %H:%M')"
   echo "- 条件: ${CONDITION_TEXT}"
-  echo "- priority: 1(高, 🔴) / 2(中, 🟠) / 3(低, 🟢), 未指定は P3(低) 扱い"
+  echo "- priority: 1(高, 🔴) / 2(中, 🟠) / 3(低, 🟢), 未指定は 3(低, 🟢) 扱い"
   echo
 
   if [ ! -s "${tmp_due}" ] && [ ! -s "${tmp_nodue}" ]; then
@@ -248,11 +248,11 @@ fi
         m = M + 12*a - 3
         return D + int((153*m + 2)/5) + 365*y + int(y/4) - int(y/100) + int(y/400) - 32045
       }
-      function pri_label(p) {
-        if (p <= 1)      return "🔴[P1]"
-        else if (p == 2) return "🟠[P2]"
-        else if (p >= 3) return "🟢[P3]"
-        else             return "[P?]"
+      function pri_icon(p) {
+        if (p <= 1)      return "🔴"
+        else if (p == 2) return "🟠"
+        else if (p >= 3) return "🟢"
+        else             return "⚪"
       }
       BEGIN {
         todayJ = ymd_to_jdn(today)
@@ -289,25 +289,25 @@ fi
         if (oN>0) {
           print "## ⏰ 期限切れ"
           print ""
-          for (i=1;i<=oN;i++) print "- " o_due[i] " " pri_label(o_pri[i]) " [[" o_base[i] "]]"
+          for (i=1;i<=oN;i++) print "- " o_due[i] " " pri_icon(o_pri[i]) " [[" o_base[i] "]]"
           print ""
         }
         if (tN>0) {
           print "## 📅 今週"
           print ""
-          for (i=1;i<=tN;i++) print "- " t_due[i] " " pri_label(t_pri[i]) " [[" t_base[i] "]]"
+          for (i=1;i<=tN;i++) print "- " t_due[i] " " pri_icon(t_pri[i]) " [[" t_base[i] "]]"
           print ""
         }
         if (nN>0) {
           print "## 📆 来週"
           print ""
-          for (i=1;i<=nN;i++) print "- " n_due[i] " " pri_label(n_pri[i]) " [[" n_base[i] "]]"
+          for (i=1;i<=nN;i++) print "- " n_due[i] " " pri_icon(n_pri[i]) " [[" n_base[i] "]]"
           print ""
         }
         if (lN>0) {
           print "## 📌 再来週以降"
           print ""
-          for (i=1;i<=lN;i++) print "- " l_due[i] " " pri_label(l_pri[i]) " [[" l_base[i] "]]"
+          for (i=1;i<=lN;i++) print "- " l_due[i] " " pri_icon(l_pri[i]) " [[" l_base[i] "]]"
           print ""
         }
       }'
@@ -321,12 +321,12 @@ fi
       sort -k2,2 "${tmp_nodue}" | while IFS=$'\t' read -r pri base; do
         [ -z "${base}" ] && continue
         case "${pri}" in
-          1) label="🔴[P1]" ;;
-          2) label="🟠[P2]" ;;
-          3|"") label="🟢[P3]" ;;  # 未指定も P3 扱い
-          *) label="[P?]" ;;
+          1) icon="🔴" ;;
+          2) icon="🟠" ;;
+          3|"") icon="🟢" ;;  # 未指定も P3 扱い
+          *) icon="⚪" ;;
         esac
-        echo "- ${label} [[${base}]]"
+        echo "- ${icon} [[${base}]]"
       done
       echo
     fi
