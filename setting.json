@@ -14,6 +14,7 @@
     // 今開いているファイルから -analysis を削る
     "tag:remove-analysis": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaa/zk_tags.sh \\\"${file}\\\" -analysis\"",
 
+    "C:/Program Files/Git/git-bash.exe" -lc "/C/work/dev/aaaaa/zk_tags.sh \"C:/work/dev/aaaaa/test.md\" +design",
     // 既存の priority 系はそのまま
     "zk:priority-high": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaa/zk_priority.sh \\\"${file}\\\" 1\"",
     "zk:priority-mid": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaa/zk_priority.sh \\\"${file}\\\" 2\"",
