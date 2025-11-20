@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # zk_tags.sh <file> [+tag1] [+tag2] [-tag3] ...
-# 現在の Markdown の frontmatter(tags: [...]) にタグを追加/削除する
+# 現在の Markdown の tags: [...] 行にタグを追加/削除する
 #  - +tag 形式: そのタグを追加（なければ追加、あれば何もしない）
 #  - -tag 形式: そのタグを削除
 #  - プレフィックス無し: 追加とみなす
@@ -9,11 +9,11 @@
 
 set -euo pipefail
 
-# ---- Windows パス→POSIX 変換（Git Bash のときのみ有効） ----
+# ---- Windows パス→POSIX 変換（Git Bash のときのみ） ----
 to_posix() {
   local p="$1"
   if command -v cygpath >/dev/null 2>&1; then
-    # C:\..., \path\to のようなパスだけ変換
+    # C:\... や \path\to... だけ変換
     if [[ "$p" =~ ^[A-Za-z]:[\\/]|\\ ]]; then
       cygpath -u "$p"
       return
@@ -23,15 +23,15 @@ to_posix() {
 }
 
 FILE="${1:-}"
-if [[ -z "${FILE}" ]]; then
+if [[ -z "$FILE" ]]; then
   echo "usage: zk_tags.sh <file> [+tag] [-tag] ..." >&2
   exit 2
 fi
 
 FILE="$(to_posix "$FILE")"
 
-if [[ ! -f "${FILE}" ]]; then
-  echo "Not a regular file: ${FILE}" >&2
+if [[ ! -f "$FILE" ]]; then
+  echo "Not a regular file: $FILE" >&2
   exit 2
 fi
 
@@ -65,7 +65,7 @@ if [[ -z "$ADD" && -z "$REM" ]]; then
   exit 0
 fi
 
-# ---- 空ファイルの場合: frontmatter を新規作成 ----
+# ---- 空ファイルなら frontmatter を新規作成 ----
 if [[ ! -s "$FILE" ]]; then
   if [[ -z "$ADD" ]]; then
     exit 0
@@ -80,7 +80,6 @@ if [[ ! -s "$FILE" ]]; then
       printf '%s' "$t"
       first=0
     done
-    # ★ ここで最後にもカンマを付ける ★
     if [[ $first -eq 0 ]]; then
       printf ', '
     fi
@@ -88,50 +87,22 @@ if [[ ! -s "$FILE" ]]; then
     printf '---\n'
   } >"$tmp"
   mv "$tmp" "$FILE"
-  exit 0
-fi
-
-# ---- 先頭が frontmatter でない場合: 先頭に frontmatter を追加 ----
-first_line="$(head -n 1 "$FILE")"
-if [[ "$first_line" != "---" ]]; then
-  if [[ -z "$ADD" ]]; then
-    exit 0
-  fi
-  tmp="${FILE}.tmp.$$"
-  {
-    printf '---\n'
-    printf 'tags: ['
-    first=1
-    for t in $ADD; do
-      if [[ $first -eq 0 ]]; then printf ', '; fi
-      printf '%s' "$t"
-      first=0
-    done
-    # ★ 最後にもカンマを付ける ★
-    if [[ $first -eq 0 ]]; then
-      printf ', '
-    fi
-    printf ']\n'
-    printf '---\n'
-    cat "$FILE"
-  } >"$tmp"
-  mv "$tmp" "$FILE"
-  exit 0
-fi
-
-# ---- 閉じ側の --- の行番号を探す ----
-close_idx="$(awk 'NR>1 && $0=="---" {print NR; exit}' "$FILE" || true)"
-if [[ -z "$close_idx" ]]; then
   exit 0
 fi
 
 tmp="${FILE}.tmp.$$"
-awk -v add="$ADD" -v rem="$REM" -v close_idx="$close_idx" '
+
+awk -v add="$ADD" -v rem="$REM" '
 BEGIN {
   n_add = split(add, add_arr, " ");
   n_rem = split(rem, rem_arr, " ");
-  tags_handled = 0;
-  saw_tags = 0;
+  N = 0;
+}
+
+# 配列に全行ためる
+{
+  N++;
+  lines[N] = $0;
 }
 
 function in_list(x, arr, n,    i) {
@@ -139,98 +110,139 @@ function in_list(x, arr, n,    i) {
   return 0;
 }
 
-{
-  if (NR == 1) {
-    print;
-    next;
+# 文字列 str をカンマ区切りで tags[] に入れる。戻り値はタグ数
+function split_tags(str, tags,    raw, n0, i, n) {
+  n0 = split(str, raw, ",");
+  n = 0;
+  for (i = 1; i <= n0; i++) {
+    gsub(/^[[:space:]]+/, "", raw[i]);
+    gsub(/[[:space:]]+$/, "", raw[i]);
+    if (raw[i] != "") {
+      n++;
+      tags[n] = raw[i];
+    }
+  }
+  return n;
+}
+
+END {
+  has_fm = (N >= 1 && lines[1] == "---") ? 1 : 0;
+
+  # 1) 既存の tags 行を探す（ファイル先頭から最初の1個だけ）
+  tags_line = 0;
+  for (i = 1; i <= N; i++) {
+    # 「tags:」と「[」が両方含まれている行を候補にする
+    if (index(lines[i], "tags:") > 0 && index(lines[i], "[") > 0) {
+      tags_line = i;
+      break;
+    }
   }
 
-  if (NR < close_idx) {
-    if (!tags_handled && match($0, /^([[:space:]]*)tags:[[:space:]]*\\[(.*)\\][[:space:]]*$/, m)) {
-      saw_tags = 1;
+  # 2) 既存タグの解析
+  indent = "";
+  delete tags;
+  tags_n = 0;
+
+  if (tags_line > 0) {
+    line = lines[tags_line];
+
+    # インデント取得（行頭の空白～tags: まで）
+    if (match(line, /^([[:space:]]*)tags:/, m)) {
       indent = m[1];
-      content = m[2];
-
-      delete tags;
-      tags_n = 0;
-      if (length(content) > 0) {
-        n0 = split(content, raw, ",");
-        for (i = 1; i <= n0; i++) {
-          gsub(/^[[:space:]]+/, "", raw[i]);
-          gsub(/[[:space:]]+$/, "", raw[i]);
-          if (raw[i] != "") {
-            tags[++tags_n] = raw[i];
-          }
-        }
-      }
-
-      # 削除 (-tag)
-      if (n_rem > 0 && tags_n > 0) {
-        delete new_tags;
-        new_n = 0;
-        for (i = 1; i <= tags_n; i++) {
-          if (!in_list(tags[i], rem_arr, n_rem)) {
-            new_tags[++new_n] = tags[i];
-          }
-        }
-        delete tags;
-        tags_n = new_n;
-        for (i = 1; i <= new_n; i++) tags[i] = new_tags[i];
-        delete new_tags;
-      }
-
-      # 追加 (+tag / プレフィックス無し)
-      for (i = 1; i <= n_add; i++) {
-        t = add_arr[i];
-        if (t == "") continue;
-        if (!in_list(t, tags, tags_n)) {
-          tags[++tags_n] = t;
-        }
-      }
-
-      # ★ tags 行を再構築（最後にカンマを残す & 1行のみ）★
-      out = indent "tags: [";
-      for (i = 1; i <= tags_n; i++) {
-        if (i > 1) out = out ", ";
-        out = out tags[i];
-      }
-      if (tags_n > 0) {
-        out = out ", ";
-      }
-      out = out "]";
-      print out;
-
-      tags_handled = 1;
-      next;
+    } else {
+      indent = "";
     }
 
-    print;
-    next;
-  }
+    # 「最初の [ 以降」を content として取り出す
+    start = index(line, "[");
+    if (start > 0) {
+      content = substr(line, start + 1);  # "[" の次の文字から行末まで
 
-  if (NR == close_idx) {
-    # frontmatter 内に tags: がなく、追加タグがある場合はここで挿入
-    if (!saw_tags && n_add > 0) {
-      out = "tags: [";
-      added = 0;
-      for (i = 1; i <= n_add; i++) {
-        t = add_arr[i];
-        if (t == "") continue;
-        if (added) out = out ", ";
-        out = out t;
-        added = 1;
+      # 末尾の空白を削る
+      gsub(/[[:space:]]+$/, "", content);
+
+      # 末尾の ] や 空白 を削っていく
+      while (length(content) > 0) {
+        c = substr(content, length(content), 1);
+        if (c == "]" || c == " " || c == "\t") {
+          content = substr(content, 1, length(content) - 1);
+        } else {
+          break;
+        }
       }
-      if (added) {
-        out = out ", ";
-      }
-      out = out "]";
-      print out;
+
+      # カンマ区切りのタグ群を配列 tags[] に
+      tags_n = split_tags(content, tags);
     }
-    print;
-    next;
   }
 
-  print;
+  # 3) 削除 (-tag)
+  if (n_rem > 0 && tags_n > 0) {
+    delete new_tags;
+    new_n = 0;
+    for (i = 1; i <= tags_n; i++) {
+      if (!in_list(tags[i], rem_arr, n_rem)) {
+        new_n++;
+        new_tags[new_n] = tags[i];
+      }
+    }
+    delete tags;
+    tags_n = new_n;
+    for (i = 1; i <= new_n; i++) tags[i] = new_tags[i];
+    delete new_tags;
+  }
+
+  # 4) 追加 (+tag / プレフィックス無し)
+  for (i = 1; i <= n_add; i++) {
+    t = add_arr[i];
+    if (t == "") continue;
+    if (!in_list(t, tags, tags_n)) {
+      tags[++tags_n] = t;
+    }
+  }
+
+  # 5) 最終的な tags 行の文字列を組み立てる（必ず1行・末尾カンマ付き）
+  if (tags_n > 0) {
+    tags_line_str = indent "tags: [";
+    for (i = 1; i <= tags_n; i++) {
+      if (i > 1) tags_line_str = tags_line_str ", ";
+      tags_line_str = tags_line_str tags[i];
+    }
+    tags_line_str = tags_line_str ", ]";
+  } else {
+    # すべて削除されてタグが空になった場合
+    tags_line_str = indent "tags: []";
+  }
+
+  # 6) tags 行の挿入/置き換え
+  if (tags_line > 0) {
+    # 既存の tags 行を書き換え
+    lines[tags_line] = tags_line_str;
+  } else {
+    # tags 行が無い
+    if (has_fm) {
+      # frontmatter がある場合: 1行目の "---" の次の行に挿入
+      for (i = N; i >= 2; i--) {
+        lines[i + 1] = lines[i];
+      }
+      lines[2] = tags_line_str;
+      N++;
+    } else {
+      # frontmatter が無い場合: 先頭に frontmatter を新規作成
+      for (i = N; i >= 1; i--) {
+        lines[i + 3] = lines[i];
+      }
+      lines[1] = "---";
+      lines[2] = tags_line_str;
+      lines[3] = "---";
+      N += 3;
+    }
+  }
+
+  # 7) 全行出力
+  for (i = 1; i <= N; i++) {
+    print lines[i];
+  }
 }
 ' "$FILE" >"$tmp"
 
