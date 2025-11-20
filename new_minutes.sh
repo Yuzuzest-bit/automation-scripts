@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # --- 設定 ---
-# フォルダを作成する場所
+# ファイルを作成する場所
 TARGET_DIR="./"
-# 作成する議事録のファイル名
+# 作成する議事録のベースファイル名
 MARKDOWN_FILENAME="meeting_minutes.md"
 # --- 設定はここまで ---
 
@@ -19,7 +19,8 @@ while true; do
   # チェックするプレフィックスを作成 (例: 20251014_1)
   PREFIX="${TODAY}_${COUNTER}"
   
-  # このプレフィックスで始まるフォルダが存在するかチェック
+  # このプレフィックスで始まるファイルやフォルダが存在するかチェック
+  # 既存のフォルダ運用(20251014_1/...)が残っていても衝突しないようにそのまま流用
   COUNT=$(ls -d "${TARGET_DIR}${PREFIX}"* 2>/dev/null | wc -l)
   
   if [ "$COUNT" -eq 0 ]; then
@@ -31,16 +32,13 @@ while true; do
   ((COUNTER++))
 done
 
-# 4. 作成するフォルダ名を決定 (例: 20251014_2)
-DIR_NAME="${TODAY}_${COUNTER}"
+# 4. 作成する Markdown ファイル名を決定 (例: 20251014_2_meeting_minutes.md)
+BASENAME="${PREFIX}_${MARKDOWN_FILENAME}"
+FULL_PATH="${TARGET_DIR}${BASENAME}"
 
-# 5. フォルダを作成
-FULL_PATH="${TARGET_DIR}${DIR_NAME}"
-echo "フォルダを作成します: ${FULL_PATH}"
-mkdir -p "$FULL_PATH"
+echo "Markdown ファイルを作成します: ${FULL_PATH}"
 
-
-# 6. 絶対パスを取得してクリップボードにコピー
+# 5. 絶対パスを取得してクリップボードにコピー
 ABS_PATH=$(readlink -f "$FULL_PATH")
 COPIED_PATH=$ABS_PATH # 表示用にコピーしておく
 
@@ -49,35 +47,30 @@ if command -v pbcopy &> /dev/null; then # macOS
   echo -n "$ABS_PATH" | pbcopy
   COPY_SUCCESS=true
 
-# ★★★ ここを修正しました ★★★
 elif command -v clip.exe &> /dev/null; then # Windows (WSL / Git Bash)
   # Git Bash用のパスをWindows形式 (C:\...) に変換
   WIN_PATH=$(cygpath -w "$ABS_PATH")
   echo -n "$WIN_PATH" | clip.exe
   COPIED_PATH=$WIN_PATH # 表示用パスをWindows形式で上書き
   COPY_SUCCESS=true
-# ★★★ 修正はここまで ★★★
 
 elif command -v xclip &> /dev/null; then # Linux (X11)
   echo -n "$ABS_PATH" | xclip -selection clipboard
   COPY_SUCCESS=true
+
 elif command -v wl-copy &> /dev/null; then # Linux (Wayland)
   echo -n "$ABS_PATH" | wl-copy
   COPY_SUCCESS=true
 fi
 
 if $COPY_SUCCESS; then
-  echo "📋 フォルダパスをクリップボードにコピーしました: ${COPIED_PATH}"
+  echo "📋 ファイルパスをクリップボードにコピーしました: ${COPIED_PATH}"
 else
   echo "⚠️ クリップボードコマンドが見つかりませんでした。"
 fi
 
-
-# 7. 議事録ファイルを作成
-MARKDOWN_FILE_PATH="${FULL_PATH}/${MARKDOWN_FILENAME}"
-echo "議事録ファイルを作成します: ${MARKDOWN_FILE_PATH}"
-
-cat << EOF > "$MARKDOWN_FILE_PATH"
+# 6. 議事録ファイルを作成
+cat << EOF > "$FULL_PATH"
 # 議事録
 
 ## 議題
@@ -100,4 +93,4 @@ cat << EOF > "$MARKDOWN_FILE_PATH"
 
 EOF
 
-echo "✅ 完了しました。"
+echo "✅ 完了しました。作成されたファイル: ${FULL_PATH}"
