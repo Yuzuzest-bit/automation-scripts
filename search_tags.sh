@@ -1,115 +1,107 @@
 #!/usr/bin/env bash
-# search_tags.sh <tag1> [tag2 ...]
+# dash_by_tags.sh <tag or -exclude> [...]
 # frontmatter tags: に指定されたタグ群をもとに、
-# 指定したタグをすべて含むノートのダッシュボードを作成する
-# macOS(Homebrew bash) / Windows Git Bash 想定
+# 「指定した必須タグをすべて含み、かつ、除外タグを含まない」ノートのダッシュボードを作成する
 #
 # 仕様:
-# - ルートディレクトリはこの .sh が置かれているフォルダ
+# - 引数:
+#     通常の単語   → 必須タグ (AND 条件)
+#     -xxxx       → 除外タグ (NOT 条件)
+#   例:
+#     dash_by_tags.sh design              # design を含むノート
+#     dash_by_tags.sh design -decision    # design かつ decision なし（= 検討中）
+#     dash_by_tags.sh design proj-aaa -decision
+#
+# - ルートディレクトリ:
+#     この .sh が置かれているフォルダをルートとする
 # - その配下のサブフォルダを find で再帰的に探索
 # - dashboards/tags_search.md に毎回上書き出力
 # - 並び順:
-#     ZK_TAG_SORT=asc  (デフォルト) ... id 昇順（古い順）
-#     ZK_TAG_SORT=desc             ... id 降順（新しい順）
+#     ZK_TAG_SORT=asc  (デフォルト) ... ファイル名昇順
+#     ZK_TAG_SORT=desc             ... ファイル名降順
 #     ZK_TAG_SORT=none             ... ソートなし（find 順）
 
 set -euo pipefail
 
-# このスクリプト自身が置かれているディレクトリをルートにする
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-ROOT="$SCRIPT_DIR"
+# ---------- ROOT 解決 ----------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${SCRIPT_DIR}"
 
-if [[ "$#" -lt 1 ]]; then
-  echo "usage: $0 <tag1> [tag2 ...]" >&2
+OUTDIR="${ROOT_DIR}/dashboards"
+mkdir -p "${OUTDIR}"
+OUT="${OUTDIR}/tags_search.md"
+
+# ---------- 引数パース（必須タグ / 除外タグ） ----------
+REQ_TAGS=""   # 必須
+EXC_TAGS=""   # 除外
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: dash_by_tags.sh <tag or -exclude> [...]" >&2
   exit 2
 fi
 
-# 引数でもらったタグ（大文字小文字は AWK 側で吸収）
-TAGS=("$@")
-
-OUTDIR="$ROOT/dashboards"
-mkdir -p "$OUTDIR"
-
-# 出力ファイル名は固定（VS Code から常にこれを開けばOK）
-OUTFILE="$OUTDIR/tags_search.md"
-
-NOW="$(date '+%Y-%m-%d %H:%M')"
-export LC_ALL=C
-
-# タグリスト "tag1,tag2,..." にして AWK に渡す
-TAG_STR=""
-for t in "${TAGS[@]}"; do
-  if [[ -z "$TAG_STR" ]]; then
-    TAG_STR="$t"
+for arg in "$@"; do
+  if [[ "$arg" == -* ]]; then
+    tag="${arg#-}"
+    [ -z "$tag" ] && continue
+    if [ -z "${EXC_TAGS}" ]; then
+      EXC_TAGS="${tag}"
+    else
+      EXC_TAGS="${EXC_TAGS},${tag}"
+    fi
   else
-    TAG_STR="$TAG_STR,$t"
+    tag="${arg}"
+    [ -z "$tag" ] && continue
+    if [ -z "${REQ_TAGS}" ]; then
+      REQ_TAGS="${tag}"
+    else
+      REQ_TAGS="${REQ_TAGS},${tag}"
+    fi
   fi
 done
 
-# 除外ディレクトリ（必要に応じて環境変数で追加も可）
-DEFAULT_SKIPS=".git .vscode .obsidian .foam node_modules templates template dashboards"
-EXTRA_SKIPS="${ZK_DASH_SKIP_DIRS:-}"
-SKIP_DIRS="${DEFAULT_SKIPS} ${EXTRA_SKIPS}"
+# ---------- 対象 Markdown 一覧 ----------
+tmp_files="$(mktemp)"
+trap 'rm -f "$tmp_files" "$tmp_list"' EXIT
 
-TMP_FILE="$(mktemp "${TMPDIR:-/tmp}/zktags.XXXXXX")"
-FILELIST="$(mktemp "${TMPDIR:-/tmp}/zktags_list.XXXXXX")"
-trap 'rm -f "$TMP_FILE" "$FILELIST"' EXIT
+find "${ROOT_DIR}" -type f -name '*.md' ! -path "${OUTDIR}/*" > "${tmp_files}"
 
-# find の引数を配列で組み立て（サブフォルダも再帰的に探索）
-FIND_ARGS=( "$ROOT" -type f -name '*.md' )
-for s in $SKIP_DIRS; do
-  FIND_ARGS+=( ! -path "*/$s/*" )
-done
+# ---------- ファイルごとのタグ判定 ----------
+tmp_list="$(mktemp)"  # マッチした basename を一時保存
 
-# 対象ファイル一覧を一旦ファイルに出力
-find "${FIND_ARGS[@]}" > "$FILELIST"
-
-# ===== awk 1回で全ファイル処理 =====
-awk -v wanted="$TAG_STR" '
-function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
-function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
-function trim(s){ return rtrim(ltrim(s)) }
-function key_of(s,    t,p,k){
-  t=ltrim(s); p=index(t,":"); if(p==0) return "";
-  k=trim(substr(t,1,p-1));
-  # 小文字化
-  for(i=1;i<=length(k);i++){
-    c=substr(k,i,1)
-    if(c>="A"&&c<="Z") k=substr(k,1,i-1) "" tolower(c) "" substr(k,i+1)
+awk -v req="${REQ_TAGS}" -v exc="${EXC_TAGS}" '
+function tolower_str(s,    i,c) {
+  for (i=1; i<=length(s); i++) {
+    c = substr(s,i,1)
+    if (c >= "A" && c <= "Z") {
+      s = substr(s,1,i-1) "" tolower(c) "" substr(s,i+1)
+    }
   }
-  return k
+  return s
 }
 
 BEGIN{
-  inFM=0
-  id=""
-  title=""
-  basename=""
-  wantCount=0
+  n_req = split(req, REQ, ",")
+  n_exc = split(exc, EXC, ",")
 
-  # wanted tags を1回だけ分解
-  split(wanted, wtmp, ",")
-  for (i in wtmp) {
-    if (wtmp[i] != "") {
-      want[++wantCount] = tolower(wtmp[i])
-    }
-  }
+  # 空要素の削除（split の都合で入ることがある）
+  for (i=1;i<=n_req;i++) if (REQ[i]=="") REQ[i]="\001"
+  for (i=1;i<=n_exc;i++) if (EXC[i]=="") EXC[i]="\002"
 }
 
-# FILELIST を1行ずつ読み、そのパスのファイルを処理する
-NR==FNR {
+{
   file = $0
-  gsub(/\r$/, "", file)   # 念のため CR 除去（Windows 対策）
+  gsub(/\r$/, "", file)
   if (file == "") next
 
-  # ===== 1ファイル分の状態初期化 =====
-  inFM    = 0
-  id      = ""
-  title   = ""
-  basename= ""
-  delete tags
+  # frontmatter を読む
+  inFM   = 0
+  fmDone = 0
+  hasTagsLine = 0
+  hasAllReq = (n_req==0 ? 1 : 0)   # 必須タグなしなら最初からOK
+  hasExc = 0
 
-  # basename 計算（最後の / の後ろ、.md を外す）
+  # basename 取得
   n = split(file, parts, "/")
   b = parts[n]
   if (length(b) > 3 && substr(b, length(b)-2) == ".md") {
@@ -117,111 +109,98 @@ NR==FNR {
   }
   basename = b
 
-  # ===== ファイルを1行ずつ読む =====
   while ((getline line < file) > 0) {
-    # frontmatter の境界 ("---") は前後空白をtrimして判定
-    if (trim(line)=="---") { inFM = !inFM; continue }
+    sub(/\r$/, "", line)
 
-    if (inFM==1) {
-      k = key_of(line)
-      if (k=="id" && id=="") {
-        p=index(line,":")
-        if(p>0){ id=trim(substr(line,p+1)) }
-      } else if (k=="tags") {
-        # 1 行で tags: [ ... ] と書かれている前提（多少はゆるく見る）
-        L=tolower(line)
-        list=""
-        s=index(L,"["); e=index(L,"]")
-        if (s>0 && e>s) {
-          list=substr(L,s+1,e-s-1)
-        } else {
-          p=index(L,":")
-          if (p>0) { list=substr(L,p+1) }
-        }
-
-        # [, ], " を削除
-        gsub(/\[/, "", list)
-        gsub(/\]/, "", list)
-        gsub(/"/, "", list)
-
-        # カンマをスペースに
-        gsub(/,/, " ", list)
-
-        n2=split(list, arr, /[ \t]+/)
-        for (j=1;j<=n2;j++) {
-          if (arr[j]!="") tags[tolower(arr[j])] = 1
-        }
+    # frontmatter 境界
+    if (line ~ /^---[ \t]*$/) {
+      if (inFM == 0 && fmDone == 0) {
+        inFM = 1
+        continue
+      } else if (inFM == 1 && fmDone == 0) {
+        inFM = 0
+        fmDone = 1
+        break   # frontmatter 終了したらそれ以上読まない
       }
-    } else {
-      # 本文側、最初の "# " 行をタイトルとして拾う（今は使っていないが保持）
-      if (title=="" && index(line, "# ")==1) {
-        title=substr(line,3)
+    }
+
+    if (inFM == 1) {
+      low = tolower_str(line)
+
+      if (index(low, "tags:") > 0) {
+        hasTagsLine = 1
+
+        # 必須タグチェック
+        if (n_req > 0) {
+          hasAllReq = 1
+          for (i=1; i<=n_req; i++) {
+            if (REQ[i] == "\001") continue
+            # 単純に部分一致（tag 名は衝突しない前提）
+            if (index(low, REQ[i]) == 0) {
+              hasAllReq = 0
+              break
+            }
+          }
+        }
+
+        # 除外タグチェック
+        if (n_exc > 0) {
+          for (j=1; j<=n_exc; j++) {
+            if (EXC[j] == "\002") continue
+            if (index(low, EXC[j]) > 0) {
+              hasExc = 1
+              break
+            }
+          }
+        }
       }
     }
   }
   close(file)
 
-  # ===== そのファイルが条件を満たすか判定 =====
-  if (wantCount==0) next
+  # tags: 行が一度も出てこなければ、どのみち必須タグを満たさないので対象外
+  if (!hasTagsLine) next
 
-  ok=1
-  for (i=1;i<=wantCount;i++) {
-    t = want[i]
-    if (!(t in tags)) { ok=0; break }
+  if (hasAllReq && !hasExc) {
+    print basename
   }
-  if (ok) {
-    # 出力: id \t basename \t title \t file
-    printf("%s\t%s\t%s\t%s\n", id, basename, title, file)
-  }
-
-  next
 }
-' "$FILELIST" > "$TMP_FILE"
+' "${tmp_files}" > "${tmp_list}"
 
-# id でソート（無い場合はそのまま）
-if [ -s "$TMP_FILE" ]; then
-  case "${ZK_TAG_SORT:-asc}" in
-    desc)
-      # 新しい順（id 降順）
-      sort -t $'\t' -k1,1r "$TMP_FILE" -o "$TMP_FILE"
-      ;;
-    none)
-      # ソートしない（find の順のまま）
-      :
-      ;;
-    *)
-      # デフォルト: 古い順（id 昇順）
-      sort -t $'\t' -k1,1 "$TMP_FILE" -o "$TMP_FILE"
-      ;;
-  esac
-fi
-
+# ---------- 出力 ----------
 {
-  printf "# Tag Dashboard: "
-  first=1
-  IFS=',' read -r -a disp <<< "$TAG_STR"
-  for idx in "${!disp[@]}"; do
-    t="${disp[$idx]}"
-    [ -z "$t" ] && continue
-    if [ $first -eq 0 ]; then
-      printf " + "
-    fi
-    printf "%s", "$t"
-    first=0
-  done
-  printf "\n\n"
+  echo "# Tags Dashboard"
+  echo
+  echo "- ROOT: ${ROOT_DIR}"
+  echo "- 必須タグ: ${REQ_TAGS:-<なし>}"
+  echo "- 除外タグ: ${EXC_TAGS:-<なし>}"
+  echo "- 生成時刻: $(date '+%Y-%m-%d %H:%M')"
+  echo
 
-  printf -- "- 生成時刻: %s\n" "$NOW"
-  printf -- "- ROOT: %s\n\n" "$ROOT"
-
-  if [ ! -s "$TMP_FILE" ]; then
-    printf "> 該当なし\n"
+  if [ ! -s "${tmp_list}" ]; then
+    echo "> 該当するノートはありませんでした。"
   else
-    while IFS=$'\t' read -r id base title path; do
-      # タイトル表示はやめて、wikilink だけを出力
-      printf -- "- [[%s]]\n" "$base"
-    done < "$TMP_FILE"
-  fi
-} > "$OUTFILE"
+    # 並び順
+    case "${ZK_TAG_SORT:-asc}" in
+      desc)
+        sort_cmd="sort -r"
+        ;;
+      none)
+        sort_cmd="cat"
+        ;;
+      *)
+        sort_cmd="sort"
+        ;;
+    esac
 
-echo "[OK] Wrote $OUTFILE"
+    echo "## ノート一覧"
+    echo
+    ${sort_cmd} "${tmp_list}" | while IFS= read -r base; do
+      [ -z "${base}" ] && continue
+      echo "- [[${base}]]"
+    done
+    echo
+  fi
+} > "${OUT}"
+
+echo "[INFO] Wrote ${OUT}"
