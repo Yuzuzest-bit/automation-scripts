@@ -68,7 +68,6 @@ fi
 # ---- 空ファイルの場合: frontmatter を新規作成 ----
 if [[ ! -s "$FILE" ]]; then
   if [[ -z "$ADD" ]]; then
-    # 追加タグがないなら何もしない（削除だけ指定されても意味がない）
     exit 0
   fi
   tmp="${FILE}.tmp.$$"
@@ -81,6 +80,10 @@ if [[ ! -s "$FILE" ]]; then
       printf '%s' "$t"
       first=0
     done
+    # ★ ここで最後にもカンマを付ける ★
+    if [[ $first -eq 0 ]]; then
+      printf ', '
+    fi
     printf ']\n'
     printf '---\n'
   } >"$tmp"
@@ -92,7 +95,6 @@ fi
 first_line="$(head -n 1 "$FILE")"
 if [[ "$first_line" != "---" ]]; then
   if [[ -z "$ADD" ]]; then
-    # 追加タグが無ければ frontmatter を作る意味が無いので何もしない
     exit 0
   fi
   tmp="${FILE}.tmp.$$"
@@ -105,6 +107,10 @@ if [[ "$first_line" != "---" ]]; then
       printf '%s' "$t"
       first=0
     done
+    # ★ 最後にもカンマを付ける ★
+    if [[ $first -eq 0 ]]; then
+      printf ', '
+    fi
     printf ']\n'
     printf '---\n'
     cat "$FILE"
@@ -113,10 +119,9 @@ if [[ "$first_line" != "---" ]]; then
   exit 0
 fi
 
-# ---- 閉じ側の --- の行番号を探す（変な frontmatter のときは何もしない）----
+# ---- 閉じ側の --- の行番号を探す ----
 close_idx="$(awk 'NR>1 && $0=="---" {print NR; exit}' "$FILE" || true)"
 if [[ -z "$close_idx" ]]; then
-  # 2つ目の --- が無い → おかしな frontmatter なので何もしない
   exit 0
 fi
 
@@ -125,8 +130,8 @@ awk -v add="$ADD" -v rem="$REM" -v close_idx="$close_idx" '
 BEGIN {
   n_add = split(add, add_arr, " ");
   n_rem = split(rem, rem_arr, " ");
-  tags_handled = 0;   # 既存 tags 行を処理したか
-  saw_tags = 0;       # frontmatter 内に tags: があったか
+  tags_handled = 0;
+  saw_tags = 0;
 }
 
 function in_list(x, arr, n,    i) {
@@ -135,21 +140,17 @@ function in_list(x, arr, n,    i) {
 }
 
 {
-  # 1行目（---）はそのまま出力
   if (NR == 1) {
     print;
     next;
   }
 
-  # frontmatter 内（1 < NR < close_idx）
   if (NR < close_idx) {
-    # まだ tags 行を処理しておらず、かつ tags: [...] 行なら書き換える
     if (!tags_handled && match($0, /^([[:space:]]*)tags:[[:space:]]*\\[(.*)\\][[:space:]]*$/, m)) {
       saw_tags = 1;
       indent = m[1];
       content = m[2];
 
-      # 既存タグをパース
       delete tags;
       tags_n = 0;
       if (length(content) > 0) {
@@ -187,35 +188,40 @@ function in_list(x, arr, n,    i) {
         }
       }
 
-      # tags 行を再構築
+      # ★ tags 行を再構築（最後にカンマを残す & 1行のみ）★
       out = indent "tags: [";
       for (i = 1; i <= tags_n; i++) {
         if (i > 1) out = out ", ";
         out = out tags[i];
       }
+      if (tags_n > 0) {
+        out = out ", ";
+      }
       out = out "]";
       print out;
+
       tags_handled = 1;
       next;
     }
 
-    # それ以外の行はそのまま
     print;
     next;
   }
 
-  # 閉じ側 --- の行
   if (NR == close_idx) {
-    # frontmatter 内に tags: が無く、追加タグがあるときは、ここで tags 行を挿入
+    # frontmatter 内に tags: がなく、追加タグがある場合はここで挿入
     if (!saw_tags && n_add > 0) {
       out = "tags: [";
-      first = 1;
+      added = 0;
       for (i = 1; i <= n_add; i++) {
         t = add_arr[i];
         if (t == "") continue;
-        if (!first) out = out ", ";
+        if (added) out = out ", ";
         out = out t;
-        first = 0;
+        added = 1;
+      }
+      if (added) {
+        out = out ", ";
       }
       out = out "]";
       print out;
@@ -224,7 +230,6 @@ function in_list(x, arr, n,    i) {
     next;
   }
 
-  # frontmatter 以降はそのまま
   print;
 }
 ' "$FILE" >"$tmp"
