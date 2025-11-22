@@ -95,8 +95,13 @@ trap 'rm -f "$tmp_due" "$tmp_nodue" "$filelist"' EXIT
 
 # 対象となる Markdown ファイル一覧をファイルに保存
 # （OUTDIR 配下は除外）
-find "${ROOT}" -type f -name '*.md' ! -path "${OUTDIR}/*" > "${filelist}"
-
+find "${ROOT}" -type f -name '*.md' \
+  ! -path "${OUTDIR}/*" \
+  ! -path "${ROOT}/.foam/*" \
+  ! -path "${ROOT}/.git/*" \
+  ! -path "${ROOT}/.vscode/*" \
+  ! -path "${ROOT}/node_modules/*" \
+  > "${filelist}"
 # ------------------------------
 # 第1段階: 各ファイルの「先頭 frontmatter だけ」を読み、
 #          「closedなし & タグ条件OK」のノートを
@@ -307,7 +312,7 @@ fi
       }
       BEGIN {
         todayJ = ymd_to_jdn(today)
-        oN=tN=nN=lN=0
+        oN = todayN = tomN = tN = nN = lN = 0
       }
       {
         due  = $1
@@ -320,9 +325,14 @@ fi
         diff = dJ - todayJ
 
         if (dJ == 0) {
-          bucket = "later"   # フォーマット異常時はとりあえず「再来週以降」へ
+          # フォーマット異常時はとりあえず「再来週以降」
+          bucket = "later"
         } else if (diff < 0) {
           bucket = "over"
+        } else if (diff == 0) {
+          bucket = "today"
+        } else if (diff == 1) {
+          bucket = "tomorrow"
         } else if (diff <= 6) {
           bucket = "this"
         } else if (diff <= 13) {
@@ -331,10 +341,19 @@ fi
           bucket = "later"
         }
 
-        if (bucket=="over")      {oN++; o_due[oN]=due;  o_base[oN]=base; o_pri[oN]=pri}
-        else if (bucket=="this"){tN++; t_due[tN]=due;  t_base[tN]=base; t_pri[tN]=pri}
-        else if (bucket=="next"){nN++; n_due[nN]=due;  n_base[nN]=base; n_pri[nN]=pri}
-        else                    {lN++; l_due[lN]=due;  l_base[lN]=base; l_pri[lN]=pri}
+        if (bucket=="over") {
+          oN++; o_due[oN]=due;  o_base[oN]=base; o_pri[oN]=pri
+        } else if (bucket=="today") {
+          todayN++; td_due[todayN]=due; td_base[todayN]=base; td_pri[todayN]=pri
+        } else if (bucket=="tomorrow") {
+          tomN++; tm_due[tomN]=due; tm_base[tomN]=base; tm_pri[tomN]=pri
+        } else if (bucket=="this") {
+          tN++; t_due[tN]=due;  t_base[tN]=base; t_pri[tN]=pri
+        } else if (bucket=="next") {
+          nN++; n_due[nN]=due;  n_base[nN]=base; n_pri[nN]=pri
+        } else {
+          lN++; l_due[lN]=due;  l_base[lN]=base; l_pri[lN]=pri
+        }
       }
       END {
         if (oN>0) {
@@ -343,8 +362,20 @@ fi
           for (i=1;i<=oN;i++) print "- " o_due[i] " " pri_icon(o_pri[i]) " [[" o_base[i] "]]"
           print ""
         }
+        if (todayN>0) {
+          print "## 📌 今日"
+          print ""
+          for (i=1;i<=todayN;i++) print "- " td_due[i] " " pri_icon(td_pri[i]) " [[" td_base[i] "]]"
+          print ""
+        }
+        if (tomN>0) {
+          print "## 📅 明日"
+          print ""
+          for (i=1;i<=tomN;i++) print "- " tm_due[i] " " pri_icon(tm_pri[i]) " [[" tm_base[i] "]]"
+          print ""
+        }
         if (tN>0) {
-          print "## 📅 今週"
+          print "## 📅 今週（今日・明日以外）"
           print ""
           for (i=1;i<=tN;i++) print "- " t_due[i] " " pri_icon(t_pri[i]) " [[" t_base[i] "]]"
           print ""
