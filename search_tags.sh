@@ -1,107 +1,62 @@
 #!/usr/bin/env bash
-# dash_by_tags.sh <tag or -exclude> [...]
-# frontmatter tags: に指定されたタグ群をもとに、
-# 「指定した必須タグをすべて含み、かつ、除外タグを含まない」ノートのダッシュボードを作成する
+# search_tag.sh
 #
-# 仕様:
-# - 引数:
-#     通常の単語   → 必須タグ (AND 条件)
-#     -xxxx       → 除外タグ (NOT 条件)
-#   例:
-#     dash_by_tags.sh design              # design を含むノート
-#     dash_by_tags.sh design -decision    # design かつ decision なし（= 検討中）
-#     dash_by_tags.sh design proj-aaa -decision
+# frontmatter の tags: を使って、指定したタグをすべて含むノートを一覧化するダッシュボード。
+# さらに、「そのノート群に含まれているタグの種類と件数」を末尾にサマリ表示する。
 #
-# - ルートディレクトリ:
-#     この .sh が置かれているフォルダをルートとする
-# - その配下のサブフォルダを find で再帰的に探索
-# - dashboards/tags_search.md に毎回上書き出力
-# - 並び順:
-#     ZK_TAG_SORT=asc  (デフォルト) ... ファイル名昇順
-#     ZK_TAG_SORT=desc             ... ファイル名降順
-#     ZK_TAG_SORT=none             ... ソートなし（find 順）
+# 使い方:
+#   search_tag.sh                 → タグ条件なし（全部のノート）
+#   search_tag.sh nwsp            → "nwsp" を含むノートだけ
+#   search_tag.sh nwsp daily      → "nwsp" AND "daily" を両方含むノートだけ
+#
+# 前提:
+#   - カレントディレクトリがノートのルート
+#   - dashboards/tags_search.md に出力
 
 set -euo pipefail
 
-# ---------- ROOT 解決 ----------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="${SCRIPT_DIR}"
+ROOT="$PWD"
+TAG_STR="$*"   # 引数全部を空白区切りで1本の文字列に（AND条件）
 
-OUTDIR="${ROOT_DIR}/dashboards"
+OUTDIR="${ROOT}/dashboards"
 mkdir -p "${OUTDIR}"
 OUT="${OUTDIR}/tags_search.md"
 
-# ---------- 引数パース（必須タグ / 除外タグ） ----------
-REQ_TAGS=""   # 必須
-EXC_TAGS=""   # 除外
-
-if [ "$#" -eq 0 ]; then
-  echo "usage: dash_by_tags.sh <tag or -exclude> [...]" >&2
-  exit 2
-fi
-
-for arg in "$@"; do
-  if [[ "$arg" == -* ]]; then
-    tag="${arg#-}"
-    [ -z "$tag" ] && continue
-    if [ -z "${EXC_TAGS}" ]; then
-      EXC_TAGS="${tag}"
-    else
-      EXC_TAGS="${EXC_TAGS},${tag}"
-    fi
-  else
-    tag="${arg}"
-    [ -z "$tag" ] && continue
-    if [ -z "${REQ_TAGS}" ]; then
-      REQ_TAGS="${tag}"
-    else
-      REQ_TAGS="${REQ_TAGS},${tag}"
-    fi
-  fi
-done
-
-# ---------- 対象 Markdown 一覧 ----------
 tmp_files="$(mktemp)"
-trap 'rm -f "$tmp_files" "$tmp_list"' EXIT
+tmp_matches="$(mktemp)"   # basename \t "tag1 tag2 ..."
+tmp_base="$(mktemp)"      # basename だけ
+tmp_summary="$(mktemp)"   # count \t tag
+trap 'rm -f "$tmp_files" "$tmp_matches" "$tmp_base" "$tmp_summary"' EXIT
 
-find "${ROOT_DIR}" -type f -name '*.md' ! -path "${OUTDIR}/*" > "${tmp_files}"
+# 対象となる Markdown ファイル一覧
+find "${ROOT}" -type f -name '*.md' ! -path "${OUTDIR}/*" > "${tmp_files}"
 
-# ---------- ファイルごとのタグ判定 ----------
-tmp_list="$(mktemp)"  # マッチした basename を一時保存
+# 1) 対象ファイルを走査して、条件に合うノートを抽出
+#    -> basename \t "tag1 tag2 ..." を tmp_matches に出力
+awk -v tags="${TAG_STR}" '
+function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
+function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
+function trim(s){ return rtrim(ltrim(s)) }
 
-awk -v req="${REQ_TAGS}" -v exc="${EXC_TAGS}" '
-function tolower_str(s,    i,c) {
-  for (i=1; i<=length(s); i++) {
-    c = substr(s,i,1)
-    if (c >= "A" && c <= "Z") {
-      s = substr(s,1,i-1) "" tolower(c) "" substr(s,i+1)
-    }
+BEGIN {
+  nTag = 0
+  if (tags != "") {
+    nTag = split(tags, wantedTags, /[[:space:]]+/)
   }
-  return s
 }
 
-BEGIN{
-  n_req = split(req, REQ, ",")
-  n_exc = split(exc, EXC, ",")
-
-  # 空要素の削除（split の都合で入ることがある）
-  for (i=1;i<=n_req;i++) if (REQ[i]=="") REQ[i]="\001"
-  for (i=1;i<=n_exc;i++) if (EXC[i]=="") EXC[i]="\002"
-}
-
-{
+# filelist を1行ずつ読む
+NR==FNR {
   file = $0
   gsub(/\r$/, "", file)
   if (file == "") next
 
-  # frontmatter を読む
   inFM   = 0
   fmDone = 0
-  hasTagsLine = 0
-  hasAllReq = (n_req==0 ? 1 : 0)   # 必須タグなしなら最初からOK
-  hasExc = 0
+  hasTag = (nTag == 0 ? 1 : 0)   # タグ指定なしなら最初からOK
+  noteTags = ""                  # このノートに付いているタグ（空白区切り文字列）
 
-  # basename 取得
+  # ベース名（.md を取る）
   n = split(file, parts, "/")
   b = parts[n]
   if (length(b) > 3 && substr(b, length(b)-2) == ".md") {
@@ -109,97 +64,129 @@ BEGIN{
   }
   basename = b
 
+  # ファイル本体を読みながら frontmatter だけ見る
   while ((getline line < file) > 0) {
     sub(/\r$/, "", line)
 
-    # frontmatter 境界
+    # frontmatter の境界
     if (line ~ /^---[ \t]*$/) {
-      if (inFM == 0 && fmDone == 0) {
-        inFM = 1
-        continue
-      } else if (inFM == 1 && fmDone == 0) {
-        inFM = 0
-        fmDone = 1
-        break   # frontmatter 終了したらそれ以上読まない
-      }
+      if (inFM == 0 && fmDone == 0) { inFM = 1; continue }
+      else if (inFM == 1 && fmDone == 0) { inFM = 0; fmDone = 1; break }
     }
 
     if (inFM == 1) {
-      low = tolower_str(line)
+      low = line
+      # 小文字化
+      for (i = 1; i <= length(low); i++) {
+        c = substr(low, i, 1)
+        if (c >= "A" && c <= "Z") {
+          low = substr(low, 1, i-1) "" tolower(c) "" substr(low, i+1)
+        }
+      }
 
+      # tags: 行を見つけたら、タグ一覧を noteTags に溜める
       if (index(low, "tags:") > 0) {
-        hasTagsLine = 1
-
-        # 必須タグチェック
-        if (n_req > 0) {
-          hasAllReq = 1
-          for (i=1; i<=n_req; i++) {
-            if (REQ[i] == "\001") continue
-            # 単純に部分一致（tag 名は衝突しない前提）
-            if (index(low, REQ[i]) == 0) {
-              hasAllReq = 0
-              break
-            }
+        p = index(low, "tags:")
+        tmp = substr(low, p + 5)     # "tags:" の後ろ
+        gsub(/[\[\]]/, "", tmp)      # [ ] を削除
+        nt = split(tmp, arr, ",")
+        for (j = 1; j <= nt; j++) {
+          t = trim(arr[j])
+          if (t != "") {
+            if (noteTags != "") noteTags = noteTags " "
+            noteTags = noteTags t
           }
         }
+      }
 
-        # 除外タグチェック
-        if (n_exc > 0) {
-          for (j=1; j<=n_exc; j++) {
-            if (EXC[j] == "\002") continue
-            if (index(low, EXC[j]) > 0) {
-              hasExc = 1
-              break
-            }
+      # タグフィルタ（AND条件）
+      if (nTag > 0 && index(low, "tags:") > 0) {
+        allOK = 1
+        for (ti = 1; ti <= nTag; ti++) {
+          t = wantedTags[ti]
+          if (t == "") continue
+          if (index(low, t) == 0) {
+            allOK = 0
+            break
           }
+        }
+        if (allOK) {
+          hasTag = 1
         }
       }
     }
   }
   close(file)
 
-  # tags: 行が一度も出てこなければ、どのみち必須タグを満たさないので対象外
-  if (!hasTagsLine) next
+  if (hasTag) {
+    # basename \t "tag1 tag2 ..."
+    print basename "\t" noteTags
+  }
 
-  if (hasAllReq && !hasExc) {
-    print basename
+  next
+}
+' "${tmp_files}" > "${tmp_matches}"
+
+# 何もヒットしていない場合は、そのまま「該当なし」を作って終わり
+cut -f1 "${tmp_matches}" | sort > "${tmp_base}"
+
+awk -F '\t' '
+{
+  # 第2フィールドに "tag1 tag2 ..." が入っている想定
+  n = split($2, a, /[[:space:]]+/)
+  for (i = 1; i <= n; i++) {
+    t = a[i]
+    if (t != "") cnt[t]++
   }
 }
-' "${tmp_files}" > "${tmp_list}"
+END {
+  for (t in cnt) {
+    print cnt[t] "\t" t
+  }
+}
+' "${tmp_matches}" | sort -nr > "${tmp_summary}"
 
-# ---------- 出力 ----------
+# 3) Markdown に整形して OUT に書き出す
+
+# 見出し用の文言を先に決めておく
+if [ -z "${TAG_STR}" ]; then
+  HEADER_TITLE="Tag Search – All notes"
+  CONDITION_TEXT="- 検索条件: タグ指定なし（全ノート）"
+else
+  HEADER_TITLE="Tag Search – ${TAG_STR}"
+  CONDITION_TEXT="- 検索条件: tags: に [${TAG_STR}] のすべてを含むノート (AND)"
+fi
+
 {
-  echo "# Tags Dashboard"
+  echo "# ${HEADER_TITLE}"
   echo
-  echo "- ROOT: ${ROOT_DIR}"
-  echo "- 必須タグ: ${REQ_TAGS:-<なし>}"
-  echo "- 除外タグ: ${EXC_TAGS:-<なし>}"
-  echo "- 生成時刻: $(date '+%Y-%m-%d %H:%M')"
+  echo "${CONDITION_TEXT}"
   echo
 
-  if [ ! -s "${tmp_list}" ]; then
-    echo "> 該当するノートはありませんでした。"
+  if [ ! -s "${tmp_base}" ]; then
+    echo "> 該当なし"
+    echo
   else
-    # 並び順
-    case "${ZK_TAG_SORT:-asc}" in
-      desc)
-        sort_cmd="sort -r"
-        ;;
-      none)
-        sort_cmd="cat"
-        ;;
-      *)
-        sort_cmd="sort"
-        ;;
-    esac
-
-    echo "## ノート一覧"
-    echo
-    ${sort_cmd} "${tmp_list}" | while IFS= read -r base; do
-      [ -z "${base}" ] && continue
+    # 検索結果のノート一覧
+    while IFS= read -r base; do
+      [ -z "$base" ] && continue
       echo "- [[${base}]]"
-    done
+    done < "${tmp_base}"
     echo
+
+    # タグサマリ
+    echo "## Tag summary for these notes"
+    echo
+    if [ ! -s "${tmp_summary}" ]; then
+      echo "> tags: (none)"
+      echo
+    else
+      while IFS=$'\t' read -r count tag; do
+        [ -z "$tag" ] && continue
+        echo "- ${tag} (${count})"
+      done < "${tmp_summary}"
+      echo
+    fi
   fi
 } > "${OUT}"
 
