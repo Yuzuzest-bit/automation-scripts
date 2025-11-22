@@ -3,10 +3,16 @@
 #
 # frontmatter の due / closed / priority だけを見て、未クローズのノートを一覧化する。
 #
-# - 第1引数 TAG が空   → タグ条件なし（全ノート対象）
-# - 第1引数 TAG が非空 → 先頭 frontmatter の tags: に TAG を含むノートのみ対象
-# - 第2引数: 互換用ダミー（現在は未使用。VS Code側の既存設定のために残しているだけ）
-# - 第3引数 ROOT: ルートディレクトリ（省略時はカレント）
+# タグ条件:
+#   - 引数 0個                → タグ条件なし, ROOT = $PWD
+#   - 引数 1個 (T1)           → タグ T1 のノートのみ対象, ROOT = $PWD
+#   - 引数 2個以上:
+#       T1 T2 ... TN ROOT_DIR → ROOT_DIR 配下を対象,
+#                                すべてのタグ(T1..TN)を含むノートだけ対象 (AND)
+#
+#   - 旧形式も互換サポート:
+#       make_tag_dashboard.sh "nwsp ctx-life" "ignored" ROOT_DIR
+#       → "nwsp ctx-life" を空白分割したタグ AND, ROOT_DIR をルートにして動作
 #
 # 対象条件:
 #   - 先頭 frontmatter に closed: が「無い」こと
@@ -31,10 +37,44 @@
 
 set -eu
 
-# ---------- 引数 ----------
-RAW_TAG="${1-}"          # 空文字もそのまま受け取る
-NEEDED_STATUS="${2-}"    # 互換用ダミー（現在未使用）
-ROOT="${3:-$PWD}"
+# ---------- 引数パース ----------
+TAG_ARGS=()
+if [ "$#" -eq 0 ]; then
+  # 引数なし: ROOT = カレント, タグ条件なし
+  ROOT="$PWD"
+elif [ "$#" -eq 1 ]; then
+  # 1個だけ: タグ1個, ROOT = カレント
+  ROOT="$PWD"
+  TAG_ARGS+=("$1")
+else
+  # 2個以上: 最後の引数を ROOT, それ以外をタグとみなす
+  eval "ROOT=\${$#}"
+  i=1
+  last=$(( $# - 1 ))
+  while [ "$i" -le "$last" ]; do
+    eval "arg=\${$i}"
+
+    if [ "$i" -eq 1 ] && [ "$#" -ge 3 ] && [ "${2-}" = "ignored" ]; then
+      # 旧形式互換:
+      #   make_tag_dashboard.sh "nwsp ctx-life" "ignored" ROOT
+      # → 第1引数を空白分割してタグ AND として扱う
+      for t in $arg; do
+        [ -n "$t" ] && TAG_ARGS+=("$t")
+      done
+      break
+    fi
+
+    [ -n "$arg" ] && TAG_ARGS+=("$arg")
+    i=$(( i + 1 ))
+  done
+fi
+
+# awk に渡すタグ文字列（空白区切り）
+if [ "${#TAG_ARGS[@]}" -eq 0 ]; then
+  TAG=""
+else
+  TAG="${TAG_ARGS[*]}"
+fi
 
 OUTDIR="${ROOT}/dashboards"
 mkdir -p "${OUTDIR}"
@@ -53,13 +93,6 @@ tmp_nodue="$(mktemp)"
 filelist="$(mktemp)"
 trap 'rm -f "$tmp_due" "$tmp_nodue" "$filelist"' EXIT
 
-# TAG（awk に渡すフィルタ用）
-if [ -z "${RAW_TAG}" ]; then
-  TAG=""
-else
-  TAG="${RAW_TAG}"
-fi
-
 # 対象となる Markdown ファイル一覧をファイルに保存
 # （OUTDIR 配下は除外）
 find "${ROOT}" -type f -name '*.md' ! -path "${OUTDIR}/*" > "${filelist}"
@@ -75,6 +108,14 @@ awk -v tag="${TAG}" -v out_due="${tmp_due}" -v out_nodue="${tmp_nodue}" '
 function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
 function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
 function trim(s){ return rtrim(ltrim(s)) }
+
+# tag 文字列を空白区切りで分解して wantedTags[] に格納
+BEGIN {
+  nTag = 0
+  if (tag != "") {
+    nTag = split(tag, wantedTags, /[[:space:]]+/)
+  }
+}
 
 # filelist を1行ずつ読むフェーズ（NR==FNR）
 NR==FNR {
@@ -118,7 +159,6 @@ NR==FNR {
         continue
       } else {
         # fmDone==1 以降の --- は本文中の横罫線として扱う
-        # 何もしないで本文として処理を続行
       }
     }
 
@@ -138,9 +178,20 @@ NR==FNR {
       copy = low
       gsub(/[ \t]/, "", copy)
 
-      # タグ指定ありなら tags: 行からマッチ判定
-      if (tag != "" && index(low, "tags:") > 0 && index(low, tag) > 0) {
-        hasTag = 1
+      # ★ タグ指定ありなら tags: 行から「AND検索」判定
+      if (tag != "" && index(low, "tags:") > 0) {
+        allOK = 1
+        for (ti = 1; ti <= nTag; ti++) {
+          t = wantedTags[ti]
+          if (t == "") continue
+          if (index(low, t) == 0) {
+            allOK = 0
+            break
+          }
+        }
+        if (allOK) {
+          hasTag = 1
+        }
       }
 
       # due: 行を取得（前後空白ありでもOK）
@@ -220,8 +271,8 @@ if [ -z "${TAG}" ]; then
   HEADER_LABEL="All Tags"
   CONDITION_TEXT="先頭 frontmatter に closed: が無いノート（due: が無ければ期限未設定扱い）"
 else
-  HEADER_LABEL="Tag: ${TAG}"
-  CONDITION_TEXT="先頭 frontmatter の tags に「${TAG}」を含み、closed: が無いノート（due: が無ければ期限未設定扱い）"
+  HEADER_LABEL="Tags: ${TAG}"
+  CONDITION_TEXT="先頭 frontmatter の tags に「${TAG}」のすべてを含み、closed: が無いノート（due: が無ければ期限未設定扱い）"
 fi
 
 {
