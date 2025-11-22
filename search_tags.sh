@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # search_tag.sh
 #
-# frontmatter の tags: を使って、指定したタグをすべて含むノートを一覧化するダッシュボード。
+# frontmatter の tags: を使って、指定したタグを条件にマッチするノートを一覧化するダッシュボード。
 # さらに、「そのノート群に含まれているタグの種類と件数」を末尾にサマリ表示する。
 #
 # 使い方:
-#   search_tag.sh                 → タグ条件なし（全部のノート）
-#   search_tag.sh nwsp            → "nwsp" を含むノートだけ
-#   search_tag.sh nwsp daily      → "nwsp" AND "daily" を両方含むノートだけ
+#   search_tag.sh                       → タグ条件なし（全部のノート）
+#   search_tag.sh nwsp                  → "nwsp" を含むノートだけ
+#   search_tag.sh nwsp daily            → "nwsp" AND "daily" を両方含むノートだけ
+#   search_tag.sh issue -zk-archive     → "issue" を含み、"zk-archive" を含まないノートだけ
+#
+# 引数ルール:
+#   - 先頭に "-" が付いていないタグ …「含んでいること」が必須 (AND条件)
+#   - 先頭に "-" が付いているタグ   …「含んでいないこと」が必須 (NOT条件)
 #
 # 前提:
 #   - カレントディレクトリがノートのルート
@@ -16,7 +21,7 @@
 set -euo pipefail
 
 ROOT="$PWD"
-TAG_STR="$*"   # 引数全部を空白区切りで1本の文字列に（AND条件）
+TAG_STR="$*"   # 引数全部を空白区切りで1本の文字列に
 
 OUTDIR="${ROOT}/dashboards"
 mkdir -p "${OUTDIR}"
@@ -37,11 +42,42 @@ awk -v tags="${TAG_STR}" '
 function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
 function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
 function trim(s){ return rtrim(ltrim(s)) }
+function tolower_str(s,    i,c) {
+  for (i = 1; i <= length(s); i++) {
+    c = substr(s, i, 1)
+    if (c >= "A" && c <= "Z") {
+      s = substr(s, 1, i-1) "" tolower(c) "" substr(s, i+1)
+    }
+  }
+  return s
+}
 
 BEGIN {
-  nTag = 0
+  nPos = 0
+  nNeg = 0
+
   if (tags != "") {
-    nTag = split(tags, wantedTags, /[[:space:]]+/)
+    nTag = split(tags, rawTags, /[[:space:]]+/)
+    for (i = 1; i <= nTag; i++) {
+      t = rawTags[i]
+      if (t == "") continue
+
+      # 小文字化
+      t = tolower_str(t)
+
+      if (substr(t, 1, 1) == "-") {
+        # 除外タグ（先頭の - を外す）
+        t2 = substr(t, 2)
+        if (t2 != "") {
+          nNeg++
+          negTags[nNeg] = t2
+        }
+      } else {
+        # 必須タグ
+        nPos++
+        posTags[nPos] = t
+      }
+    }
   }
 }
 
@@ -53,7 +89,6 @@ NR==FNR {
 
   inFM   = 0
   fmDone = 0
-  hasTag = (nTag == 0 ? 1 : 0)   # タグ指定なしなら最初からOK
   noteTags = ""                  # このノートに付いているタグ（空白区切り文字列）
 
   # ベース名（.md を取る）
@@ -70,19 +105,18 @@ NR==FNR {
 
     # frontmatter の境界
     if (line ~ /^---[ \t]*$/) {
-      if (inFM == 0 && fmDone == 0) { inFM = 1; continue }
-      else if (inFM == 1 && fmDone == 0) { inFM = 0; fmDone = 1; break }
+      if (inFM == 0 && fmDone == 0) {
+        inFM = 1
+        continue
+      } else if (inFM == 1 && fmDone == 0) {
+        inFM = 0
+        fmDone = 1
+        break
+      }
     }
 
     if (inFM == 1) {
-      low = line
-      # 小文字化
-      for (i = 1; i <= length(low); i++) {
-        c = substr(low, i, 1)
-        if (c >= "A" && c <= "Z") {
-          low = substr(low, 1, i-1) "" tolower(c) "" substr(low, i+1)
-        }
-      }
+      low = tolower_str(line)
 
       # tags: 行を見つけたら、タグ一覧を noteTags に溜める
       if (index(low, "tags:") > 0) {
@@ -98,26 +132,49 @@ NR==FNR {
           }
         }
       }
-
-      # タグフィルタ（AND条件）
-      if (nTag > 0 && index(low, "tags:") > 0) {
-        allOK = 1
-        for (ti = 1; ti <= nTag; ti++) {
-          t = wantedTags[ti]
-          if (t == "") continue
-          if (index(low, t) == 0) {
-            allOK = 0
-            break
-          }
-        }
-        if (allOK) {
-          hasTag = 1
-        }
-      }
     }
   }
   close(file)
 
+  # ---- タグフィルタ判定 ----
+  hasTag = 1
+
+  # 1) 必須タグ（正のタグ）がある場合: すべて含んでいるか？
+  if (nPos > 0) {
+    hasTag = 1
+    nt2 = split(noteTags, tagsArr, /[[:space:]]+/)
+    for (pi = 1; pi <= nPos; pi++) {
+      t = posTags[pi]
+      found = 0
+      for (j = 1; j <= nt2; j++) {
+        if (tagsArr[j] == t) {
+          found = 1
+          break
+        }
+      }
+      if (!found) {
+        hasTag = 0
+        break
+      }
+    }
+  }
+
+  # 2) 除外タグ（負のタグ）がある場合: ひとつも含んでいないか？
+  if (hasTag && nNeg > 0) {
+    nt2 = split(noteTags, tagsArr, /[[:space:]]+/)
+    for (ni = 1; ni <= nNeg; ni++) {
+      t = negTags[ni]
+      for (j = 1; j <= nt2; j++) {
+        if (tagsArr[j] == t) {
+          hasTag = 0
+          break
+        }
+      }
+      if (!hasTag) break
+    }
+  }
+
+  # フィルタを通ったノートだけ出力
   if (hasTag) {
     # basename \t "tag1 tag2 ..."
     print basename "\t" noteTags
@@ -127,7 +184,7 @@ NR==FNR {
 }
 ' "${tmp_files}" > "${tmp_matches}"
 
-# 何もヒットしていない場合は、そのまま「該当なし」を作って終わり
+# 2) 何もヒットしていない場合は、そのまま「該当なし」を作って終わり
 cut -f1 "${tmp_matches}" | sort > "${tmp_base}"
 
 awk -F '\t' '
@@ -154,7 +211,7 @@ if [ -z "${TAG_STR}" ]; then
   CONDITION_TEXT="- 検索条件: タグ指定なし（全ノート）"
 else
   HEADER_TITLE="Tag Search – ${TAG_STR}"
-  CONDITION_TEXT="- 検索条件: tags: に [${TAG_STR}] のすべてを含むノート (AND)"
+  CONDITION_TEXT="- 検索条件: 指定タグ（例: issue -zk-archive）をすべて満たすノート（通常タグ=含む, 先頭が\"-\"のタグ=含まない / AND 条件）"
 fi
 
 {
