@@ -139,12 +139,17 @@ BEGIN {
 # 4. ユニークな使用タグ一覧をソート
 sort -u "$tmp_tags_used" > "$tmp_tags_used_sorted"
 
-# 5. 結果を txt に書き出し
+# 5. 結果を txt に書き出し（NotDefined を先に）
 {
   echo "# zk_tags_lint result"
   echo "# ROOT: $ROOT"
   echo "# Registry: $REG_MD"
   echo "# Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+  echo
+
+  echo "## Tags NOT defined in registry"
+  # used - registry
+  comm -23 "$tmp_tags_used_sorted" "$tmp_tags_reg" || true
   echo
 
   echo "## Used tags (sorted)"
@@ -154,17 +159,13 @@ sort -u "$tmp_tags_used" > "$tmp_tags_used_sorted"
     echo "(no tags found)"
   fi
   echo
-
-  echo "## Tags NOT defined in registry"
-  # used - registry
-  comm -23 "$tmp_tags_used_sorted" "$tmp_tags_reg" || true
-  echo
 } > "$OUT_TXT"
 
 # 6. 結果ファイルを開く
 if command -v code >/dev/null 2>&1; then
+  # VS Code があれば優先（Windows の Git Bash でもこれで開けるはず）
   code -r "$OUT_TXT"
-elif [[ "$OSTYPE" == darwin* ]]; then
+elif [[ "${OSTYPE:-}" == darwin* ]]; then
   open "$OUT_TXT" || true
 elif command -v xdg-open >/dev/null 2>&1; then
   xdg-open "$OUT_TXT" || true
