@@ -23,6 +23,9 @@
     // commands.md を開く（Windows / Git Bash, ルート固定版）
     "open commands.md (win)": "\"C:/Program Files/Git/git-bash.exe\" -lc \"cd /C/work/dev/aaaaa; code -r ./commands.md\"",
 
+    // issue を検索
+    "search_tag issue": "\"C:/Program Files/Git/git-bash.exe\" -lc \"cd /C/work/dev/aaaaa; ./search_tag.sh issue -zk-archive && code -r /C/work/dev/aaaaa/dashboards/tags_search.md\"",
+
     
   }
 }
