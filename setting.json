@@ -19,5 +19,10 @@
     "zk:priority-high": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaa/zk_priority.sh \\\"${file}\\\" 1\"",
     "zk:priority-mid": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaa/zk_priority.sh \\\"${file}\\\" 2\"",
     "zk:priority-low": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaa/zk_priority.sh \\\"${file}\\\" 3\""
+
+    // commands.md を開く（Windows / Git Bash, ルート固定版）
+    "open commands.md (win)": "\"C:/Program Files/Git/git-bash.exe\" -lc \"cd /C/work/dev/aaaaa; code -r ./commands.md\"",
+
+    
   }
 }
