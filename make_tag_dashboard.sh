@@ -293,7 +293,8 @@ fi
   else
     # ---------- 期限付き ----------
     if [ -s "${tmp_due}" ]; then
-      sort "${tmp_due}" | awk -F '\t' -v today="${TODAY}" '
+      # due 昇順, priority 昇順, basename 降順（同じdue内だけ逆順のイメージ）
+      sort -k1,1 -k2,2n -k3,3r "${tmp_due}" | awk -F '\t' -v today="${TODAY}" '
       function ymd_to_jdn(s,    Y,M,D,a,y,m) {
         if (s == "" || length(s) < 10) return 0
         Y = substr(s,1,4) + 0
