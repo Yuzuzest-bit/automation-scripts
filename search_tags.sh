@@ -185,7 +185,8 @@ NR==FNR {
 ' "${tmp_files}" > "${tmp_matches}"
 
 # 2) 何もヒットしていない場合は、そのまま「該当なし」を作って終わり
-cut -f1 "${tmp_matches}" | sort > "${tmp_base}"
+#    → basename を「降順」にソート（新しいIDぽいものが上に来る想定）
+cut -f1 "${tmp_matches}" | sort -r > "${tmp_base}"
 
 awk -F '\t' '
 {
@@ -224,7 +225,7 @@ fi
     echo "> 該当なし"
     echo
   else
-    # 検索結果のノート一覧
+    # 検索結果のノート一覧（basename 降順）
     while IFS= read -r base; do
       [ -z "$base" ] && continue
       echo "- [[${base}]]"
