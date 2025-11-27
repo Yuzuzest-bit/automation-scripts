@@ -17,6 +17,10 @@
 # 前提:
 #   - カレントディレクトリがノートのルート
 #   - dashboards/tags_search.md に出力
+#
+# 並び順:
+#   - frontmatter に created: があるノート → created の降順（新しい created が上）
+#   - created: が無いノート                → 一番古い扱いで最後に並ぶ
 
 set -euo pipefail
 
@@ -28,8 +32,8 @@ mkdir -p "${OUTDIR}"
 OUT="${OUTDIR}/tags_search.md"
 
 tmp_files="$(mktemp)"
-tmp_matches="$(mktemp)"   # basename \t "tag1 tag2 ..."
-tmp_base="$(mktemp)"      # basename だけ
+tmp_matches="$(mktemp)"   # basename \t "tag1 tag2 ..." \t created
+tmp_base="$(mktemp)"      # ソート済み basename だけ
 tmp_summary="$(mktemp)"   # count \t tag
 trap 'rm -f "$tmp_files" "$tmp_matches" "$tmp_base" "$tmp_summary"' EXIT
 
@@ -37,7 +41,7 @@ trap 'rm -f "$tmp_files" "$tmp_matches" "$tmp_base" "$tmp_summary"' EXIT
 find "${ROOT}" -type f -name '*.md' ! -path "${OUTDIR}/*" > "${tmp_files}"
 
 # 1) 対象ファイルを走査して、条件に合うノートを抽出
-#    -> basename \t "tag1 tag2 ..." を tmp_matches に出力
+#    -> basename \t "tag1 tag2 ..." \t created を tmp_matches に出力
 awk -v tags="${TAG_STR}" '
 function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
 function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
@@ -90,6 +94,7 @@ NR==FNR {
   inFM   = 0
   fmDone = 0
   noteTags = ""                  # このノートに付いているタグ（空白区切り文字列）
+  created  = ""                  # frontmatter の created: の値
 
   # ベース名（.md を取る）
   n = split(file, parts, "/")
@@ -117,6 +122,13 @@ NR==FNR {
 
     if (inFM == 1) {
       low = tolower_str(line)
+
+      # created: 行（先頭に created: が来る想定）
+      if (match(low, /^created[ \t]*:/)) {
+        # オリジナル行から : の後ろを取り、そのまま trim
+        val = substr(line, index(line, ":") + 1)
+        created = trim(val)
+      }
 
       # tags: 行を見つけたら、タグ一覧を noteTags に溜める
       if (index(low, "tags:") > 0) {
@@ -176,18 +188,30 @@ NR==FNR {
 
   # フィルタを通ったノートだけ出力
   if (hasTag) {
-    # basename \t "tag1 tag2 ..."
-    print basename "\t" noteTags
+    # basename \t "tag1 tag2 ..." \t created
+    print basename "\t" noteTags "\t" created
   }
 
   next
 }
 ' "${tmp_files}" > "${tmp_matches}"
 
-# 2) 何もヒットしていない場合は、そのまま「該当なし」を作って終わり
-#    → basename を「降順」にソート（新しいIDぽいものが上に来る想定）
-cut -f1 "${tmp_matches}" | sort -r > "${tmp_base}"
+# 2) 抽出したノートを created でソートして basename のみ tmp_base に出力
+#    - created があるノート: created 降順
+#    - created がないノート: "0000-00-00" として扱い、一番最後に回る
+awk -F '\t' '
+{
+  base    = $1
+  tags    = $2  # ここでは使わない
+  created = $3
 
+  key = (created != "" ? created : "0000-00-00")
+
+  print key "\t" base
+}
+' "${tmp_matches}" | sort -r -k1,1 -k2,2 | cut -f2 > "${tmp_base}"
+
+# タグサマリ用: 第2フィールド (tags) だけを使うので従来通り
 awk -F '\t' '
 {
   # 第2フィールドに "tag1 tag2 ..." が入っている想定
@@ -225,7 +249,7 @@ fi
     echo "> 該当なし"
     echo
   else
-    # 検索結果のノート一覧（basename 降順）
+    # 検索結果のノート一覧（created 降順）
     while IFS= read -r base; do
       [ -z "$base" ] && continue
       echo "- [[${base}]]"
