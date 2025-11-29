@@ -10,6 +10,10 @@
 # - 1行に複数単語がある場合は、空白で分割して OR 検索
 #   （＝全部まとめて「どれか1つでも含まれればOK」）
 #
+# 並び順:
+#   - 子ノートの frontmatter に created: があれば、その日付 (YYYY-MM-DD) の降順
+#   - created: が無いノートは "0000-00-00" 扱いで最後に並ぶ
+#
 # 出力:
 #   dashboards/children_search.md
 
@@ -46,7 +50,7 @@ mkdir -p "$OUTDIR"
 OUT="${OUTDIR}/children_search.md"
 
 tmp_links="$(mktemp)"
-tmp_results="$(mktemp)"
+tmp_results="$(mktemp)"   # ★ created \t basename を貯める
 tmp_kw_raw="$(mktemp)"
 tmp_kw="$(mktemp)"
 trap 'rm -f "$tmp_links" "$tmp_results" "$tmp_kw_raw" "$tmp_kw"' EXIT
@@ -140,6 +144,7 @@ fi
 # ---------------------------------------------
 # 3) 各子ノートについて、「いずれかのキーワードを含むか」を判定
 #    - grep -Fi -f パターンファイル で OR 検索
+#    - さらに frontmatter の created: (YYYY-MM-DD) を拾って並び替えに使う
 # ---------------------------------------------
 while IFS= read -r title; do
   [[ -z "$title" ]] && continue
@@ -154,7 +159,71 @@ while IFS= read -r title; do
       if [[ "$base" == *.md ]]; then
         base="${base%.md}"
       fi
-      printf '%s\t%s\n' "$base" "$f" >> "$tmp_results"
+
+      # ★ このファイルの frontmatter から created: を取得
+      created="$(
+        awk '
+        function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
+        function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
+        function trim(s){ return rtrim(ltrim(s)) }
+        function tolower_str(s,    i,c) {
+          for (i = 1; i <= length(s); i++) {
+            c = substr(s, i, 1)
+            if (c >= "A" && c <= "Z") {
+              s = substr(s, 1, i-1) "" tolower(c) "" substr(s, i+1)
+            }
+          }
+          return s
+        }
+
+        BEGIN {
+          inFM   = 0
+          fmDone = 0
+          created = ""
+        }
+
+        {
+          sub(/\r$/, "", $0)
+          line = $0
+
+          # frontmatter 境界
+          if (line ~ /^---[ \t]*$/) {
+            if (inFM == 0 && fmDone == 0) {
+              inFM = 1
+              next
+            } else if (inFM == 1 && fmDone == 0) {
+              inFM = 0
+              fmDone = 1
+              next
+            }
+          }
+
+          if (inFM == 1) {
+            low = tolower_str(line)
+            if (match(low, /^created[ \t]*:/)) {
+              val = substr(line, index(line, ":") + 1)
+              created = trim(val)
+            }
+          }
+        }
+
+        END {
+          if (created ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}/) {
+            print substr(created, 1, 10)
+          } else {
+            print ""
+          }
+        }
+        ' "$f"
+      )"
+
+      # created が無い場合は最古扱いの "0000-00-00" にする
+      if [[ -z "$created" ]]; then
+        created="0000-00-00"
+      fi
+
+      # created \t basename を保存
+      printf '%s\t%s\n' "$created" "$base" >> "$tmp_results"
     fi
   done < <(
     find "$ROOT" -type f -name "${title}.md" \
@@ -177,6 +246,7 @@ done < "$tmp_links"
   echo "- キーワードファイル: $(basename "$KEY_MD")"
   echo "- 検索条件: このノートがリンクしている子ノートのうち、"
   echo "  キーワード Markdown の本文に書かれた単語の **いずれかを含む** ノート"
+  echo "- 並び順: 子ノートの created: (YYYY-MM-DD) 降順（未指定は最後）"
   echo "- 実行時刻: $(date '+%Y-%m-%d %H:%M')"
   echo
 
@@ -196,8 +266,9 @@ done < "$tmp_links"
   else
     echo "## マッチした子ノート"
     echo
-    sort -t $'\t' -k1,1 "$tmp_results" \
-      | awk -F '\t' '!seen[$1]++ { print "- [[" $1 "]]" }'
+    # ★ created 降順・basename 降順でソートしつつ、basename でユニーク化
+    sort -t $'\t' -k1,1r -k2,2r "$tmp_results" \
+      | awk -F '\t' '!seen[$2]++ { print "- [[" $2 "]]" }'
     echo
   fi
 } > "$OUT"
