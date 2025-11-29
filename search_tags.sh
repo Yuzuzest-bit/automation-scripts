@@ -85,7 +85,6 @@ BEGIN {
   }
 }
 
-# filelist を1行ずつ読む
 NR==FNR {
   file = $0
   gsub(/\r$/, "", file)
@@ -93,8 +92,8 @@ NR==FNR {
 
   inFM   = 0
   fmDone = 0
-  noteTags = ""                  # このノートに付いているタグ（空白区切り文字列）
-  created  = ""                  # frontmatter の created: の値
+  noteTags = ""
+  created  = ""
 
   # ベース名（.md を取る）
   n = split(file, parts, "/")
@@ -104,7 +103,7 @@ NR==FNR {
   }
   basename = b
 
-  # ファイル本体を読みながら frontmatter だけ見る
+  # frontmatter だけ読む
   while ((getline line < file) > 0) {
     sub(/\r$/, "", line)
 
@@ -123,18 +122,17 @@ NR==FNR {
     if (inFM == 1) {
       low = tolower_str(line)
 
-      # created: 行（先頭に created: が来る想定）
+      # created:
       if (match(low, /^created[ \t]*:/)) {
-        # オリジナル行から : の後ろを取り、そのまま trim
         val = substr(line, index(line, ":") + 1)
         created = trim(val)
       }
 
-      # tags: 行を見つけたら、タグ一覧を noteTags に溜める
+      # tags:
       if (index(low, "tags:") > 0) {
         p = index(low, "tags:")
-        tmp = substr(low, p + 5)     # "tags:" の後ろ
-        gsub(/[\[\]]/, "", tmp)      # [ ] を削除
+        tmp = substr(low, p + 5)
+        gsub(/[\[\]]/, "", tmp)
         nt = split(tmp, arr, ",")
         for (j = 1; j <= nt; j++) {
           t = trim(arr[j])
@@ -148,10 +146,15 @@ NR==FNR {
   }
   close(file)
 
+  # ★ ここを追加：frontmatter が無いファイルは結果から除外 ★
+  if (!fmDone) {
+    next
+  }
+
   # ---- タグフィルタ判定 ----
   hasTag = 1
 
-  # 1) 必須タグ（正のタグ）がある場合: すべて含んでいるか？
+  # 1) 必須タグ
   if (nPos > 0) {
     hasTag = 1
     nt2 = split(noteTags, tagsArr, /[[:space:]]+/)
@@ -171,7 +174,7 @@ NR==FNR {
     }
   }
 
-  # 2) 除外タグ（負のタグ）がある場合: ひとつも含んでいないか？
+  # 2) 除外タグ
   if (hasTag && nNeg > 0) {
     nt2 = split(noteTags, tagsArr, /[[:space:]]+/)
     for (ni = 1; ni <= nNeg; ni++) {
@@ -186,9 +189,7 @@ NR==FNR {
     }
   }
 
-  # フィルタを通ったノートだけ出力
   if (hasTag) {
-    # basename \t "tag1 tag2 ..." \t created
     print basename "\t" noteTags "\t" created
   }
 
