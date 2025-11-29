@@ -1,27 +1,26 @@
 #!/usr/bin/env bash
-# search_children_text.sh <current_file> <query> [ROOT_DIR]
+# search_children_from_list.sh <current_file> <keywords_md> [ROOT_DIR]
 #
-# 今見ているノート内の wikilink ([[...]]）を子ノートとみなし、
-# その子ノートの中から「指定テキストを含むもの」だけをダッシュボードに出す。
+# 今開いているノートの wikilink ([[...]]) を子ノートとみなし、
+# 別の Markdown ファイルに列挙した「検索ワード」のどれかを含む
+# 子ノートだけをダッシュボードに出力する。
 #
-# - 再帰しない：子ノートのさらに子…は検索しない
-# - wikilink は [[title]] / [[title|alias]] の両方に対応
-# - title に対応する "<title>.md" を ROOT 配下から探す
+# - キーワード Markdown には frontmatter が付いていてもよい（無視する）
+# - frontmatter 以降の本文部分の「各行」が検索ワード定義
+# - 1行に複数単語がある場合は、空白で分割して OR 検索
+#   （＝全部まとめて「どれか1つでも含まれればOK」）
 #
 # 出力:
 #   dashboards/children_search.md
-#
-# 使い方のイメージ（VS Code Command Runner など）:
-#   search_children_text.sh "${file}" "通信方式" "${workspaceFolder}"
 
 set -euo pipefail
 
 CUR_FILE="${1:-}"
-QUERY="${2:-}"
+KEY_MD="${2:-}"
 ROOT="${3:-$PWD}"
 
-if [[ -z "$CUR_FILE" || -z "$QUERY" ]]; then
-  echo "usage: $0 <current_file> <query> [ROOT_DIR]" >&2
+if [[ -z "$CUR_FILE" || -z "$KEY_MD" ]]; then
+  echo "usage: $0 <current_file> <keywords_md> [ROOT_DIR]" >&2
   exit 2
 fi
 
@@ -30,7 +29,11 @@ if [[ ! -f "$CUR_FILE" ]]; then
   exit 1
 fi
 
-# 絶対パスに寄せておく（見た目用）
+if [[ ! -f "$KEY_MD" ]]; then
+  echo "Keyword markdown not found: $KEY_MD" >&2
+  exit 1
+fi
+
 CUR_BASENAME="$(basename "$CUR_FILE")"
 if [[ "$CUR_BASENAME" == *.md ]]; then
   CUR_TITLE="${CUR_BASENAME%.md}"
@@ -44,21 +47,85 @@ OUT="${OUTDIR}/children_search.md"
 
 tmp_links="$(mktemp)"
 tmp_results="$(mktemp)"
-trap 'rm -f "$tmp_links" "$tmp_results"' EXIT
+tmp_kw_raw="$(mktemp)"
+tmp_kw="$(mktemp)"
+trap 'rm -f "$tmp_links" "$tmp_results" "$tmp_kw_raw" "$tmp_kw"' EXIT
 
 # ---------------------------------------------
-# 1) 親ノートから wikilink ([[...]]）を抽出 → タイトル部分だけにする
-#    [[foo]] / [[foo|alias]] → "foo"
-#    重複は awk でユニーク化
+# 1) キーワード Markdown からパターン抽出
+#    - frontmatter(---〜---)は無視
+#    - frontmatter の外側の各行を空白分割し、単語ごとに1パターン
 # ---------------------------------------------
-# grep -o で "[[...]]" 部分だけ抜き出し、sed で中身を取り出し、"|alias" を落とす
+awk '
+function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
+function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
+function trim(s){ return rtrim(ltrim(s)) }
+
+BEGIN {
+  inFM   = 0
+  fmDone = 0
+}
+
+{
+  # CR除去
+  sub(/\r$/, "", $0)
+  line = $0
+
+  # frontmatter 境界判定
+  if (line ~ /^---[ \t]*$/) {
+    if (inFM == 0 && fmDone == 0) {
+      inFM = 1
+      next
+    } else if (inFM == 1 && fmDone == 0) {
+      inFM = 0
+      fmDone = 1
+      next
+    }
+  }
+
+  # frontmatter 内は無視
+  if (inFM == 1) next
+
+  # frontmatter 終了後のみ処理
+  if (fmDone == 0) next
+
+  txt = trim(line)
+  if (txt == "") next
+
+  # 行を空白分割して単語ごとに出力（OR 検索用）
+  n = split(txt, arr, /[[:space:]]+/)
+  for (i = 1; i <= n; i++) {
+    w = trim(arr[i])
+    if (w != "") {
+      print w
+    }
+  }
+}
+' "$KEY_MD" > "$tmp_kw_raw"
+
+# 重複を削除して確定版に
+awk 'NF>0 && !seen[$0]++' "$tmp_kw_raw" > "$tmp_kw"
+
+if [[ ! -s "$tmp_kw" ]]; then
+  {
+    echo "# Children Search – ${CUR_TITLE}"
+    echo
+    echo "> キーワードファイルから有効な検索ワードが取得できませんでした。"
+    echo
+  } > "$OUT"
+  echo "[INFO] Wrote ${OUT}"
+  exit 0
+fi
+
+# ---------------------------------------------
+# 2) 親ノートから wikilink ([[...]]）を抽出 → タイトル一覧
+# ---------------------------------------------
 grep -o '\[\[[^]]*]]' "$CUR_FILE" 2>/dev/null \
   | sed 's/^\[\[\(.*\)\]\]$/\1/' \
   | sed 's/|.*$//' \
   | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
   | awk 'NF>0 && !seen[$0]++' > "$tmp_links"
 
-# 子リンクが無ければその旨を出して終了
 if [[ ! -s "$tmp_links" ]]; then
   {
     echo "# Children Search – ${CUR_TITLE}"
@@ -71,25 +138,18 @@ if [[ ! -s "$tmp_links" ]]; then
 fi
 
 # ---------------------------------------------
-# 2) 各タイトルに対応する "<title>.md" を ROOT 配下から探し、
-#    そのファイルに QUERY を含むかどうかを grep で判定
-#
-#    マッチしたものは:
-#      basename\tfullpath
-#    の形式で tmp_results に出力する
+# 3) 各子ノートについて、「いずれかのキーワードを含むか」を判定
+#    - grep -Fi -f パターンファイル で OR 検索
 # ---------------------------------------------
 while IFS= read -r title; do
   [[ -z "$title" ]] && continue
 
-  # タイトルに対応するファイルを探す
-  # 例: foo → foo.md
-  # .git や .vscode, dashboards などは除外
+  # タイトルに対応する "<title>.md" を ROOT 配下から探す
   while IFS= read -r f; do
-    # 念のため regular file だけ
     [[ -f "$f" ]] || continue
 
-    # 中身に QUERY を含むか？ (大文字小文字は区別しないなら -i)
-    if grep -qi -- "$QUERY" "$f"; then
+    # いずれかのキーワードを含むか？
+    if grep -Fiq -f "$tmp_kw" "$f"; then
       base="$(basename "$f")"
       if [[ "$base" == *.md ]]; then
         base="${base%.md}"
@@ -108,24 +168,34 @@ while IFS= read -r title; do
 done < "$tmp_links"
 
 # ---------------------------------------------
-# 3) Markdown に整形
+# 4) Markdown に整形して出力
 # ---------------------------------------------
 {
   echo "# Children Search – ${CUR_TITLE}"
   echo
   echo "- 親ノート: [[${CUR_TITLE}]]"
-  echo "- 検索キーワード: \`$QUERY\`"
-  echo "- 対象: このノートが wikilink している子ノートのみ（再帰なし）"
+  echo "- キーワードファイル: $(basename "$KEY_MD")"
+  echo "- 検索条件: このノートがリンクしている子ノートのうち、"
+  echo "  キーワード Markdown の本文に書かれた単語の **いずれかを含む** ノート"
   echo "- 実行時刻: $(date '+%Y-%m-%d %H:%M')"
   echo
 
+  echo "## 使用キーワード"
+  echo
+  while IFS= read -r kw; do
+    [[ -z "$kw" ]] && continue
+    echo "- \`$kw\`"
+  done < "$tmp_kw"
+  echo
+
   if [[ ! -s "$tmp_results" ]]; then
+    echo "## マッチした子ノート"
+    echo
     echo "> 該当する子ノートはありませんでした。"
     echo
   else
     echo "## マッチした子ノート"
     echo
-    # basename でソートして、重複があればユニーク化して出力
     sort -t $'\t' -k1,1 "$tmp_results" \
       | awk -F '\t' '!seen[$1]++ { print "- [[" $1 "]]" }'
     echo
