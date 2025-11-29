@@ -122,21 +122,21 @@ BEGIN {
   }
 }
 
-# filelist を1行ずつ読むフェーズ（NR==FNR）
 NR==FNR {
   file = $0
-  gsub(/\r$/, "", file)   # 念のため CR 除去（Windows 由来対策）
+  gsub(/\r$/, "", file)
   if (file == "") next
 
   # ===== 1ファイル分の状態初期化 =====
   inFM     = 0
-  fmDone   = 0            # 一度 frontmatter を閉じたら 1 になる
-  hasTag   = (tag == "" ? 1 : 0)   # タグ指定なしなら最初から通す
+  fmDone   = 0              # 一度 frontmatter を閉じたら 1
+  nonHead  = 0              # ★ frontmatter が先頭にないとき 1
+  hasTag   = (tag == "" ? 1 : 0)
   hasDue   = 0
   isClosed = 0
   dueVal   = ""
   basename = ""
-  priVal   = 3    # ★ デフォルト優先度 = 3 (低, P3)
+  priVal   = 3              # priority デフォルト (低)
 
   # ベース名取得（最後の / の後ろ、.md を削る）
   n = split(file, parts, "/")
@@ -146,10 +146,18 @@ NR==FNR {
   }
   basename = b
 
-  # ===== ここから、そのファイルの中身を1行ずつ読む =====
+  # ===== ファイルを1行ずつ読む =====
   while ((getline line < file) > 0) {
-    # 行末 CR を除去（CRLF 対策）
     sub(/\r$/, "", line)
+
+    # ★ frontmatter 開始前の「最初の非空行」が --- 以外なら nonHead=1
+    tmpLine = line
+    gsub(/[ \t]/, "", tmpLine)
+    if (fmDone == 0 && inFM == 0) {
+      if (tmpLine != "" && line !~ /^---[ \t]*$/) {
+        nonHead = 1
+      }
+    }
 
     # ---- frontmatter 境界判定 ----
     if (line ~ /^---[ \t]*$/) {
@@ -163,13 +171,12 @@ NR==FNR {
         fmDone = 1
         continue
       } else {
-        # fmDone==1 以降の --- は本文中の横罫線として扱う
+        # frontmatter 終了後の --- は無視（本文の区切り）
       }
     }
 
     # ---- frontmatter 内だけを見る ----
     if (inFM == 1) {
-      # FM 内の処理: tags / due / closed / priority を拾う
       low = line
       # 小文字化
       for (i = 1; i <= length(low); i++) {
@@ -179,11 +186,10 @@ NR==FNR {
         }
       }
 
-      # 空白を削ったバージョン（"closed :" にも対応）
       copy = low
       gsub(/[ \t]/, "", copy)
 
-      # ★ タグ指定ありなら tags: 行から「AND検索」判定
+      # タグ AND 条件
       if (tag != "" && index(low, "tags:") > 0) {
         allOK = 1
         for (ti = 1; ti <= nTag; ti++) {
@@ -199,13 +205,11 @@ NR==FNR {
         }
       }
 
-      # due: 行を取得（前後空白ありでもOK）
+      # due:
       if (index(copy, "due:") > 0) {
         p = index(low, ":")
         if (p > 0) {
           tmp = trim(substr(low, p+1))
-          # YYYY-MM-DD 形式で始まるものだけ採用し、
-          # 先頭10文字（YYYY-MM-DD）だけを due として使う
           if (tmp ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}/) {
             dueVal = substr(tmp, 1, 10)
             hasDue = 1
@@ -213,52 +217,48 @@ NR==FNR {
         }
       }
 
-      # closed: が1回でも出てきたらクローズ扱い
+      # closed:
       if (index(copy, "closed:") > 0) {
         isClosed = 1
       }
 
-      # priority: 行を取得
+      # priority:
       if (index(low, "priority:") > 0) {
         p = index(low, "priority:")
         if (p > 0) {
           tmp = trim(substr(low, p + 9))
-          sub(/^#/, "", tmp)   # 仮に "# high" などがあっても "#" を除去
+          sub(/^#/, "", tmp)
           tmp = trim(tmp)
 
-          # tmp はすでに小文字化済み想定
           if (tmp ~ /^1/ || tmp ~ /^high/ || tmp ~ /^p1/) {
             priVal = 1
           } else if (tmp ~ /^2/ || tmp ~ /^mid/ || tmp ~ /^medium/ || tmp ~ /^p2/) {
             priVal = 2
           } else if (tmp ~ /^3/ || tmp ~ /^low/ || tmp ~ /^p3/) {
             priVal = 3
-          } else {
-            # それ以外はデフォルト(3)のまま
           }
         }
       }
     }
-
-    # inFM==0（本文）は完全に無視する
+    # 本文は何も見ない
   }
   close(file)
 
+  # ★ frontmatter がない or 先頭ではないファイルは対象外
+  if (!fmDone || nonHead) {
+    next
+  }
+
   # ===== そのファイルの判定 & 出力 =====
   # 条件:
-  #   - hasTag      : タグ条件を満たしている（またはタグ無条件）
-  #   - !isClosed   : frontmatter に closed: が無い
-  #
-  # かつ、
-  #   - hasDue==1                 → 期限付き → out_due に書き出す
-  #   - hasDue==0                 → 期限未設定 → out_nodue に書き出す
-  #     （frontmatterが無い or frontmatterにdue:が無い）
+  #   - hasTag    : タグ条件を満たす（or タグ指定なし）
+  #   - !isClosed : frontmatter に closed: が無い
   if (hasTag && !isClosed) {
     if (hasDue) {
-      # due あり: due \t priVal \t basename
+      # due あり → tmp_due
       printf("%s\t%d\t%s\n", dueVal, priVal, basename) >> out_due
     } else {
-      # due なし: priVal \t basename
+      # due なし → tmp_nodue
       printf("%d\t%s\n", priVal, basename) >> out_nodue
     }
   }
