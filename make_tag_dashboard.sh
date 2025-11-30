@@ -27,10 +27,17 @@
 #     - 3 / low / p3     → 低 (🟢)
 #     - 未指定 or 不明   → 低 (🟢, P3) 扱い
 #
+# 追加仕様:
+#   - frontmatter の tags: に "BrainDump"（大文字小文字無視）が含まれるノートは
+#     priority を強制的に 1(高) に引き上げ、
+#     ダッシュボードの最上部に「🔥 BrainDump（要整理）」として表示する。
+#
 # 出力:
 #   - いつでも dashboards/default_dashboard.md に上書き
 #   - 形式:
-#       ## ⏰ 期限切れ / 📅 今週 / 📆 来週 / 📌 再来週以降
+#       ## 🔥 BrainDump（要整理）
+#       - 2025-11-20 🔴 [[ノート名]]
+#       ## ⏰ 期限切れ / 📌 今日 / 📅 明日 / 📅 今週 / 📆 来週 / 📌 再来週以降
 #       - 2025-11-20 🔴 [[ノート名]]
 #       ## 📝 期限未設定
 #       - 🟢 [[ノート名]]
@@ -40,10 +47,8 @@ set -eu
 # ---------- 引数パース ----------
 TAG_ARGS=()
 if [ "$#" -eq 0 ]; then
-  # 引数なし: ROOT = カレント, タグ条件なし
   ROOT="$PWD"
 elif [ "$#" -eq 1 ]; then
-  # 1個だけ: タグ1個, ROOT = カレント
   ROOT="$PWD"
   TAG_ARGS+=("$1")
 else
@@ -57,7 +62,6 @@ else
     if [ "$i" -eq 1 ] && [ "$#" -ge 3 ] && [ "${2-}" = "ignored" ]; then
       # 旧形式互換:
       #   make_tag_dashboard.sh "nwsp ctx-life" "ignored" ROOT
-      # → 第1引数を空白分割してタグ AND として扱う
       for t in $arg; do
         [ -n "$t" ] && TAG_ARGS+=("$t")
       done
@@ -78,23 +82,18 @@ fi
 
 OUTDIR="${ROOT}/dashboards"
 mkdir -p "${OUTDIR}"
-
-# 出力は常に同じファイル
 OUT="${OUTDIR}/default_dashboard.md"
 
 # 今日の日付（YYYY-MM-DD）
 TODAY="$(date '+%Y-%m-%d')"
 
-# 一時ファイル:
-#   - tmp_due   : due ありのノート (due<TAB>priority<TAB>basename)
-#   - tmp_nodue : due なしのノート (priority<TAB>basename)
+# 一時ファイル
 tmp_due="$(mktemp)"
 tmp_nodue="$(mktemp)"
 filelist="$(mktemp)"
 trap 'rm -f "$tmp_due" "$tmp_nodue" "$filelist"' EXIT
 
-# 対象となる Markdown ファイル一覧をファイルに保存
-# （OUTDIR 配下は除外）
+# 対象となる Markdown ファイル一覧（OUTDIR 配下などは除外）
 find "${ROOT}" -type f -name '*.md' \
   ! -path "${OUTDIR}/*" \
   ! -path "${ROOT}/.foam/*" \
@@ -102,12 +101,12 @@ find "${ROOT}" -type f -name '*.md' \
   ! -path "${ROOT}/.vscode/*" \
   ! -path "${ROOT}/node_modules/*" \
   > "${filelist}"
+
 # ------------------------------
-# 第1段階: 各ファイルの「先頭 frontmatter だけ」を読み、
-#          「closedなし & タグ条件OK」のノートを
-#          ・dueあり → tmp_due（due<TAB>priority<TAB>basename）
-#          ・dueなし → tmp_nodue（priority<TAB>basename）
-#          に振り分ける
+# 第1段階: frontmatter を読んで情報抽出
+#   - BrainDump タグ検出
+#   - due / closed / priority 読み取り
+#   - 条件を満たすノートを tmp_due / tmp_nodue へ
 # ------------------------------
 awk -v tag="${TAG}" -v out_due="${tmp_due}" -v out_nodue="${tmp_nodue}" '
 function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
@@ -129,11 +128,12 @@ NR==FNR {
 
   # ===== 1ファイル分の状態初期化 =====
   inFM     = 0
-  fmDone   = 0              # 一度 frontmatter を閉じたら 1
-  nonHead  = 0              # ★ frontmatter が先頭にないとき 1
+  fmDone   = 0
+  nonHead  = 0
   hasTag   = (tag == "" ? 1 : 0)
   hasDue   = 0
   isClosed = 0
+  isBrainDump = 0
   dueVal   = ""
   basename = ""
   priVal   = 3              # priority デフォルト (低)
@@ -150,7 +150,7 @@ NR==FNR {
   while ((getline line < file) > 0) {
     sub(/\r$/, "", line)
 
-    # ★ frontmatter 開始前の「最初の非空行」が --- 以外なら nonHead=1
+    # frontmatter 開始前の「最初の非空行」が --- 以外なら nonHead=1
     tmpLine = line
     gsub(/[ \t]/, "", tmpLine)
     if (fmDone == 0 && inFM == 0) {
@@ -162,11 +162,9 @@ NR==FNR {
     # ---- frontmatter 境界判定 ----
     if (line ~ /^---[ \t]*$/) {
       if (inFM == 0 && fmDone == 0) {
-        # 1個目の --- : frontmatter 開始
         inFM = 1
         continue
       } else if (inFM == 1 && fmDone == 0) {
-        # 2個目の --- : frontmatter 終了
         inFM = 0
         fmDone = 1
         continue
@@ -203,6 +201,11 @@ NR==FNR {
         if (allOK) {
           hasTag = 1
         }
+      }
+
+      # BrainDump タグ検出（tags: 行に "braindump" を含んでいればフラグON）
+      if (index(low, "tags:") > 0 && index(low, "braindump") > 0) {
+        isBrainDump = 1
       }
 
       # due:
@@ -244,22 +247,27 @@ NR==FNR {
   }
   close(file)
 
-  # ★ frontmatter がない or 先頭ではないファイルは対象外
+  # frontmatter がない or 先頭ではないファイルは対象外
   if (!fmDone || nonHead) {
     next
   }
 
-  # ===== そのファイルの判定 & 出力 =====
-  # 条件:
-  #   - hasTag    : タグ条件を満たす（or タグ指定なし）
-  #   - !isClosed : frontmatter に closed: が無い
+  # BrainDump の場合は priority を強制的に高(1)へ引き上げ
+  if (isBrainDump && priVal > 1) {
+    priVal = 1
+  }
+
+  # hasTag: タグ条件を満たす（or タグ指定なし）
+  # !isClosed: frontmatter に closed: が無い
   if (hasTag && !isClosed) {
     if (hasDue) {
       # due あり → tmp_due
-      printf("%s\t%d\t%s\n", dueVal, priVal, basename) >> out_due
+      #   due<TAB>priority<TAB>isBrainDump<TAB>basename
+      printf("%s\t%d\t%d\t%s\n", dueVal, priVal, isBrainDump, basename) >> out_due
     } else {
       # due なし → tmp_nodue
-      printf("%d\t%s\n", priVal, basename) >> out_nodue
+      #   priority<TAB>isBrainDump<TAB>basename
+      printf("%d\t%d\t%s\n", priVal, isBrainDump, basename) >> out_nodue
     }
   }
 
@@ -281,11 +289,12 @@ else
 fi
 
 {
-  echo "# ${HEADER_LABEL} – 未クローズタスク (due昇順)"
+  echo "# ${HEADER_LABEL} – 未クローズタスク (due昇順 + BrainDump優先)"
   echo
   echo "- 生成時刻: $(date '+%Y-%m-%d %H:%M')"
   echo "- 条件: ${CONDITION_TEXT}"
   echo "- priority: 1(高, 🔴) / 2(中, 🟠) / 3(低, 🟢), 未指定は 3(低, 🟢) 扱い"
+  echo "- BrainDump タグ付きノートは 🔥 セクションに最優先で表示"
   echo
 
   if [ ! -s "${tmp_due}" ] && [ ! -s "${tmp_nodue}" ]; then
@@ -293,8 +302,9 @@ fi
   else
     # ---------- 期限付き ----------
     if [ -s "${tmp_due}" ]; then
-      # due 昇順, priority 昇順, basename 降順（同じdue内だけ逆順のイメージ）
-      sort -k1,1 -k2,2n -k3,3r "${tmp_due}" | awk -F '\t' -v today="${TODAY}" '
+      # isBrainDump(3列目) 降順 → BrainDump が先頭、
+      # その中で due 昇順, priority 昇順, basename 降順
+      sort -k3,3nr -k1,1 -k2,2n -k4,4r "${tmp_due}" | awk -F '\t' -v today="${TODAY}" '
       function ymd_to_jdn(s,    Y,M,D,a,y,m) {
         if (s == "" || length(s) < 10) return 0
         Y = substr(s,1,4) + 0
@@ -314,13 +324,21 @@ fi
       BEGIN {
         todayJ = ymd_to_jdn(today)
         oN = todayN = tomN = tN = nN = lN = 0
+        bdN = 0
       }
       {
         due  = $1
         pri  = $2 + 0
-        base = $3
+        bd   = $3 + 0
+        base = $4
 
         if (due !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}/) next
+
+        # BrainDump は専用セクションへ
+        if (bd == 1) {
+          bdN++; bd_due[bdN]=due; bd_base[bdN]=base; bd_pri[bdN]=pri
+          next
+        }
 
         dJ = ymd_to_jdn(substr(due,1,10))
         diff = dJ - todayJ
@@ -357,6 +375,12 @@ fi
         }
       }
       END {
+        if (bdN>0) {
+          print "## 🔥 BrainDump（要整理）"
+          print ""
+          for (i=1;i<=bdN;i++) print "- " bd_due[i] " " pri_icon(bd_pri[i]) " [[" bd_base[i] "]]"
+          print ""
+        }
         if (oN>0) {
           print "## ⏰ 期限切れ"
           print ""
@@ -400,8 +424,9 @@ fi
     if [ -s "${tmp_nodue}" ]; then
       echo "## 📝 期限未設定"
       echo
-      # priority, basename 形式なので、basename で安定ソート
-      sort -k2,2 "${tmp_nodue}" | while IFS=$'\t' read -r pri base; do
+      # priority<TAB>isBrainDump<TAB>basename
+      # BrainDump を 2列目降順で優先、その中で priority 昇順
+      sort -k2,2nr -k1,1n -k3,3 "${tmp_nodue}" | while IFS=$'\t' read -r pri bd base; do
         [ -z "${base}" ] && continue
         case "${pri}" in
           1) icon="🔴" ;;
