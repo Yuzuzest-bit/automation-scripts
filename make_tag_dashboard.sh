@@ -27,14 +27,22 @@
 #     - 3 / low / p3     → 低 (🟢)
 #     - 未指定 or 不明   → 低 (🟢, P3) 扱い
 #
-# 追加仕様:
+# 追加仕様1（BrainDump）:
 #   - frontmatter の tags: に "BrainDump"（大文字小文字無視）が含まれるノートは
 #     priority を強制的に 1(高) に引き上げ、
 #     ダッシュボードの最上部に「🔥 BrainDump（要整理）」として表示する。
 #
+# 追加仕様2（ゲート）:
+#   - frontmatter の tags: に "gate-" で始まるタグ（例: gate-release, gate-final）が
+#     含まれており、かつ due: がある未クローズノートは「ゲート」とみなす。
+#   - 今日〜60日先までのゲートを、ダッシュボードの先頭に
+#     「🚧 ゲート（2ヶ月以内の絶対に動かせない期日）」として表示する。
+#
 # 出力:
 #   - いつでも dashboards/default_dashboard.md に上書き
 #   - 形式:
+#       ## 🚧 ゲート（2ヶ月以内の絶対に動かせない期日）
+#       - 2025-12-31 🔴 [[ノート名]]
 #       ## 🔥 BrainDump（要整理）
 #       - 2025-11-20 🔴 [[ノート名]]
 #       ## ⏰ 期限切れ / 📌 今日 / 📅 明日 / 📅 今週 / 📆 来週 / 📌 再来週以降
@@ -90,8 +98,9 @@ TODAY="$(date '+%Y-%m-%d')"
 # 一時ファイル
 tmp_due="$(mktemp)"
 tmp_nodue="$(mktemp)"
+tmp_gate="$(mktemp)"   # ★ ゲート専用
 filelist="$(mktemp)"
-trap 'rm -f "$tmp_due" "$tmp_nodue" "$filelist"' EXIT
+trap 'rm -f "$tmp_due" "$tmp_nodue" "$tmp_gate" "$filelist"' EXIT
 
 # 対象となる Markdown ファイル一覧（OUTDIR 配下などは除外）
 find "${ROOT}" -type f -name '*.md' \
@@ -104,11 +113,11 @@ find "${ROOT}" -type f -name '*.md' \
 
 # ------------------------------
 # 第1段階: frontmatter を読んで情報抽出
-#   - BrainDump タグ検出
+#   - BrainDump / gate- タグ検出
 #   - due / closed / priority 読み取り
-#   - 条件を満たすノートを tmp_due / tmp_nodue へ
+#   - 条件を満たすノートを tmp_due / tmp_nodue / tmp_gate へ
 # ------------------------------
-awk -v tag="${TAG}" -v out_due="${tmp_due}" -v out_nodue="${tmp_nodue}" '
+awk -v tag="${TAG}" -v out_due="${tmp_due}" -v out_nodue="${tmp_nodue}" -v out_gate="${tmp_gate}" '
 function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
 function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
 function trim(s){ return rtrim(ltrim(s)) }
@@ -134,9 +143,10 @@ NR==FNR {
   hasDue   = 0
   isClosed = 0
   isBrainDump = 0
+  isGate   = 0          # ★ gate- タグ検出用
   dueVal   = ""
   basename = ""
-  priVal   = 3              # priority デフォルト (低)
+  priVal   = 3          # priority デフォルト (低)
 
   # ベース名取得（最後の / の後ろ、.md を削る）
   n = split(file, parts, "/")
@@ -208,6 +218,11 @@ NR==FNR {
         isBrainDump = 1
       }
 
+      # gate- タグ検出（例: gate-release, gate-final）
+      if (index(low, "tags:") > 0 && index(low, "gate-") > 0) {
+        isGate = 1
+      }
+
       # due:
       if (index(copy, "due:") > 0) {
         p = index(low, ":")
@@ -271,12 +286,18 @@ NR==FNR {
     }
   }
 
+  # ゲート（gate- タグ付き & due あり & 未クローズ）は tmp_gate にも出力
+  if (hasTag && !isClosed && isGate && hasDue) {
+    # due<TAB>priority<TAB>basename
+    printf("%s\t%d\t%s\n", dueVal, priVal, basename) >> out_gate
+  }
+
   next
 }
 ' "${filelist}"
 
 # ------------------------------
-# 第2段階: tmp_due / tmp_nodue を使って Markdown 出力
+# 第2段階: tmp_due / tmp_nodue / tmp_gate を使って Markdown 出力
 # ------------------------------
 
 # 見出し用ラベル
@@ -289,13 +310,57 @@ else
 fi
 
 {
-  echo "# ${HEADER_LABEL} – 未クローズタスク (due昇順 + BrainDump優先)"
+  echo "# ${HEADER_LABEL} – 未クローズタスク (due昇順 + BrainDump優先 + ゲート表示)"
   echo
   echo "- 生成時刻: $(date '+%Y-%m-%d %H:%M')"
   echo "- 条件: ${CONDITION_TEXT}"
   echo "- priority: 1(高, 🔴) / 2(中, 🟠) / 3(低, 🟢), 未指定は 3(低, 🟢) 扱い"
   echo "- BrainDump タグ付きノートは 🔥 セクションに最優先で表示"
+  echo "- gate-* タグ付きノートは 🚧 セクションに 2ヶ月先まで表示"
   echo
+
+  # ---------- ゲート（2ヶ月以内） ----------
+  if [ -s "${tmp_gate}" ]; then
+    echo "## 🚧 ゲート（2ヶ月以内の絶対に動かせない期日）"
+    echo
+    sort -k1,1 "${tmp_gate}" | awk -F '\t' -v today="${TODAY}" '
+      function ymd_to_jdn(s,    Y,M,D,a,y,m) {
+        if (s == "" || length(s) < 10) return 0
+        Y = substr(s,1,4) + 0
+        M = substr(s,6,2) + 0
+        D = substr(s,9,2) + 0
+        a = int((14 - M)/12)
+        y = Y + 4800 - a
+        m = M + 12*a - 3
+        return D + int((153*m + 2)/5) + 365*y + int(y/4) - int(y/100) + int(y/400) - 32045
+      }
+      function pri_icon(p) {
+        if (p <= 1)      return "🔴"
+        else if (p == 2) return "🟠"
+        else if (p >= 3) return "🟢"
+        else             return "⚪"
+      }
+      BEGIN {
+        todayJ = ymd_to_jdn(today)
+      }
+      {
+        due  = $1
+        pri  = $2 + 0
+        base = $3
+
+        if (due !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}/) next
+
+        dJ   = ymd_to_jdn(substr(due,1,10))
+        diff = dJ - todayJ
+
+        # 今日〜60日先までのみ表示
+        if (diff < 0 || diff > 60) next
+
+        print "- " due " " pri_icon(pri) " [[" base "]]"
+      }
+    '
+    echo
+  fi
 
   if [ ! -s "${tmp_due}" ] && [ ! -s "${tmp_nodue}" ]; then
     echo "> 該当なし"
