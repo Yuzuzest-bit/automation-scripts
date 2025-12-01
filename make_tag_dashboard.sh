@@ -30,25 +30,39 @@
 # 追加仕様1（BrainDump）:
 #   - frontmatter の tags: に "BrainDump"（大文字小文字無視）が含まれるノートは
 #     priority を強制的に 1(高) に引き上げ、
-#     ダッシュボードの最上部に「🔥 BrainDump（要整理）」として表示する。
+#     ダッシュボードの「🔥 BrainDump（要整理）」セクションに出す。
 #
 # 追加仕様2（ゲート）:
 #   - frontmatter の tags: に "gate-" で始まるタグ（例: gate-release, gate-final）が
-#     含まれており、かつ due: がある未クローズノートは「ゲート」とみなす。
-#   - 今日〜60日先までのゲートを、ダッシュボードの先頭に
-#     「🚧 ゲート（2ヶ月以内の絶対に動かせない期日）」として表示する。
+#     含まれているノートは「ゲート」とみなす。
+#   - ゲートは他のタスクと同じバケツに混ざるが、アイコンが「🚧🔴」のようになって目立つ。
+#
+# 追加仕様3（2ヶ月先まで週単位バケツ）:
+#   - 期限付きタスクは、今日から 60 日先までは 1週間ごとにグルーピングする。
+#     diff = due - today とすると:
+#       diff < 0        → 期限切れ
+#       diff = 0        → 今日
+#       diff = 1        → 明日
+#       2–6             → 今週（今日・明日以外）
+#       7–13            → 来週
+#       14–20           → 2週後
+#       21–27           → 3週後
+#       28–34           → 4週後
+#       35–41           → 5週後
+#       42–48           → 6週後
+#       49–55           → 7週後
+#       56–60           → 8週後
+#       >60             → 2ヶ月より先
 #
 # 出力:
 #   - いつでも dashboards/default_dashboard.md に上書き
 #   - 形式:
-#       ## 🚧 ゲート（2ヶ月以内の絶対に動かせない期日）
-#       - 2025-12-31 🔴 [[ノート名]]
 #       ## 🔥 BrainDump（要整理）
-#       - 2025-11-20 🔴 [[ノート名]]
-#       ## ⏰ 期限切れ / 📌 今日 / 📅 明日 / 📅 今週 / 📆 来週 / 📌 再来週以降
+#       - 2025-11-20 🚧🔴 [[ノート名]]
+#       ## ⏰ 期限切れ / 📌 今日 / 📅 明日 / 📅 今週 / ...
 #       - 2025-11-20 🔴 [[ノート名]]
 #       ## 📝 期限未設定
-#       - 🟢 [[ノート名]]
+#       - 🚧🟠 [[ノート名]]
 
 set -eu
 
@@ -98,9 +112,8 @@ TODAY="$(date '+%Y-%m-%d')"
 # 一時ファイル
 tmp_due="$(mktemp)"
 tmp_nodue="$(mktemp)"
-tmp_gate="$(mktemp)"   # ★ ゲート専用
 filelist="$(mktemp)"
-trap 'rm -f "$tmp_due" "$tmp_nodue" "$tmp_gate" "$filelist"' EXIT
+trap 'rm -f "$tmp_due" "$tmp_nodue" "$filelist"' EXIT
 
 # 対象となる Markdown ファイル一覧（OUTDIR 配下などは除外）
 find "${ROOT}" -type f -name '*.md' \
@@ -115,9 +128,9 @@ find "${ROOT}" -type f -name '*.md' \
 # 第1段階: frontmatter を読んで情報抽出
 #   - BrainDump / gate- タグ検出
 #   - due / closed / priority 読み取り
-#   - 条件を満たすノートを tmp_due / tmp_nodue / tmp_gate へ
+#   - 条件を満たすノートを tmp_due / tmp_nodue へ
 # ------------------------------
-awk -v tag="${TAG}" -v out_due="${tmp_due}" -v out_nodue="${tmp_nodue}" -v out_gate="${tmp_gate}" '
+awk -v tag="${TAG}" -v out_due="${tmp_due}" -v out_nodue="${tmp_nodue}" '
 function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
 function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
 function trim(s){ return rtrim(ltrim(s)) }
@@ -143,7 +156,7 @@ NR==FNR {
   hasDue   = 0
   isClosed = 0
   isBrainDump = 0
-  isGate   = 0          # ★ gate- タグ検出用
+  isGate   = 0
   dueVal   = ""
   basename = ""
   priVal   = 3          # priority デフォルト (低)
@@ -277,19 +290,13 @@ NR==FNR {
   if (hasTag && !isClosed) {
     if (hasDue) {
       # due あり → tmp_due
-      #   due<TAB>priority<TAB>isBrainDump<TAB>basename
-      printf("%s\t%d\t%d\t%s\n", dueVal, priVal, isBrainDump, basename) >> out_due
+      #   due<TAB>priority<TAB>isBrainDump<TAB>isGate<TAB>basename
+      printf("%s\t%d\t%d\t%d\t%s\n", dueVal, priVal, isBrainDump, isGate, basename) >> out_due
     } else {
       # due なし → tmp_nodue
-      #   priority<TAB>isBrainDump<TAB>basename
-      printf("%d\t%d\t%s\n", priVal, isBrainDump, basename) >> out_nodue
+      #   priority<TAB>isBrainDump<TAB>isGate<TAB>basename
+      printf("%d\t%d\t%d\t%s\n", priVal, isBrainDump, isGate, basename) >> out_nodue
     }
-  }
-
-  # ゲート（gate- タグ付き & due あり & 未クローズ）は tmp_gate にも出力
-  if (hasTag && !isClosed && isGate && hasDue) {
-    # due<TAB>priority<TAB>basename
-    printf("%s\t%d\t%s\n", dueVal, priVal, basename) >> out_gate
   }
 
   next
@@ -297,7 +304,7 @@ NR==FNR {
 ' "${filelist}"
 
 # ------------------------------
-# 第2段階: tmp_due / tmp_nodue / tmp_gate を使って Markdown 出力
+# 第2段階: tmp_due / tmp_nodue を使って Markdown 出力
 # ------------------------------
 
 # 見出し用ラベル
@@ -310,57 +317,14 @@ else
 fi
 
 {
-  echo "# ${HEADER_LABEL} – 未クローズタスク (due昇順 + BrainDump優先 + ゲート表示)"
+  echo "# ${HEADER_LABEL} – 未クローズタスク (2ヶ月先まで週単位 + BrainDump優先 + gateアイコン)"
   echo
   echo "- 生成時刻: $(date '+%Y-%m-%d %H:%M')"
   echo "- 条件: ${CONDITION_TEXT}"
   echo "- priority: 1(高, 🔴) / 2(中, 🟠) / 3(低, 🟢), 未指定は 3(低, 🟢) 扱い"
-  echo "- BrainDump タグ付きノートは 🔥 セクションに最優先で表示"
-  echo "- gate-* タグ付きノートは 🚧 セクションに 2ヶ月先まで表示"
+  echo "- BrainDump タグ付きノートは 🔥 セクションに表示"
+  echo "- gate-* タグ付きノートは 🚧🔴 のようにアイコンで目立つ"
   echo
-
-  # ---------- ゲート（2ヶ月以内） ----------
-  if [ -s "${tmp_gate}" ]; then
-    echo "## 🚧 ゲート（2ヶ月以内の絶対に動かせない期日）"
-    echo
-    sort -k1,1 "${tmp_gate}" | awk -F '\t' -v today="${TODAY}" '
-      function ymd_to_jdn(s,    Y,M,D,a,y,m) {
-        if (s == "" || length(s) < 10) return 0
-        Y = substr(s,1,4) + 0
-        M = substr(s,6,2) + 0
-        D = substr(s,9,2) + 0
-        a = int((14 - M)/12)
-        y = Y + 4800 - a
-        m = M + 12*a - 3
-        return D + int((153*m + 2)/5) + 365*y + int(y/4) - int(y/100) + int(y/400) - 32045
-      }
-      function pri_icon(p) {
-        if (p <= 1)      return "🔴"
-        else if (p == 2) return "🟠"
-        else if (p >= 3) return "🟢"
-        else             return "⚪"
-      }
-      BEGIN {
-        todayJ = ymd_to_jdn(today)
-      }
-      {
-        due  = $1
-        pri  = $2 + 0
-        base = $3
-
-        if (due !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}/) next
-
-        dJ   = ymd_to_jdn(substr(due,1,10))
-        diff = dJ - todayJ
-
-        # 今日〜60日先までのみ表示
-        if (diff < 0 || diff > 60) next
-
-        print "- " due " " pri_icon(pri) " [[" base "]]"
-      }
-    '
-    echo
-  fi
 
   if [ ! -s "${tmp_due}" ] && [ ! -s "${tmp_nodue}" ]; then
     echo "> 該当なし"
@@ -369,7 +333,7 @@ fi
     if [ -s "${tmp_due}" ]; then
       # isBrainDump(3列目) 降順 → BrainDump が先頭、
       # その中で due 昇順, priority 昇順, basename 降順
-      sort -k3,3nr -k1,1 -k2,2n -k4,4r "${tmp_due}" | awk -F '\t' -v today="${TODAY}" '
+      sort -k3,3nr -k1,1 -k2,2n -k5,5r "${tmp_due}" | awk -F '\t' -v today="${TODAY}" '
       function ymd_to_jdn(s,    Y,M,D,a,y,m) {
         if (s == "" || length(s) < 10) return 0
         Y = substr(s,1,4) + 0
@@ -386,22 +350,37 @@ fi
         else if (p >= 3) return "🟢"
         else             return "⚪"
       }
+      function combo_icon(p, gateFlag,    base) {
+        base = pri_icon(p)
+        if (gateFlag > 0) return "🚧" base
+        else              return base
+      }
       BEGIN {
         todayJ = ymd_to_jdn(today)
-        oN = todayN = tomN = tN = nN = lN = 0
-        bdN = 0
+
+        oN = todayN = tomN = 0
+        for (i = 0; i <= 8; i++) {
+          wN[i] = 0  # w0..w8 まで（今週〜8週後）
+        }
+        laterN = 0
+        bdN    = 0
       }
       {
-        due  = $1
-        pri  = $2 + 0
-        bd   = $3 + 0
-        base = $4
+        due   = $1
+        pri   = $2 + 0
+        bd    = $3 + 0
+        gate  = $4 + 0
+        base  = $5
 
         if (due !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}/) next
 
         # BrainDump は専用セクションへ
         if (bd == 1) {
-          bdN++; bd_due[bdN]=due; bd_base[bdN]=base; bd_pri[bdN]=pri
+          bdN++
+          bd_due[bdN]  = due
+          bd_base[bdN] = base
+          bd_pri[bdN]  = pri
+          bd_gate[bdN] = gate
           next
         }
 
@@ -409,8 +388,7 @@ fi
         diff = dJ - todayJ
 
         if (dJ == 0) {
-          # フォーマット異常時はとりあえず「再来週以降」
-          bucket = "later"
+          bucket = "later"  # フォーマット異常時はとりあえず「2ヶ月より先」扱い
         } else if (diff < 0) {
           bucket = "over"
         } else if (diff == 0) {
@@ -418,68 +396,131 @@ fi
         } else if (diff == 1) {
           bucket = "tomorrow"
         } else if (diff <= 6) {
-          bucket = "this"
+          bucket = "w0"     # 今週（今日・明日以外）
         } else if (diff <= 13) {
-          bucket = "next"
+          bucket = "w1"     # 来週
+        } else if (diff <= 20) {
+          bucket = "w2"     # 2週後
+        } else if (diff <= 27) {
+          bucket = "w3"     # 3週後
+        } else if (diff <= 34) {
+          bucket = "w4"     # 4週後
+        } else if (diff <= 41) {
+          bucket = "w5"     # 5週後
+        } else if (diff <= 48) {
+          bucket = "w6"     # 6週後
+        } else if (diff <= 55) {
+          bucket = "w7"     # 7週後
+        } else if (diff <= 60) {
+          bucket = "w8"     # 8週後
         } else {
-          bucket = "later"
+          bucket = "later"  # 2ヶ月より先
         }
 
         if (bucket=="over") {
-          oN++; o_due[oN]=due;  o_base[oN]=base; o_pri[oN]=pri
+          oN++
+          o_due[oN]  = due
+          o_base[oN] = base
+          o_pri[oN]  = pri
+          o_gate[oN] = gate
         } else if (bucket=="today") {
-          todayN++; td_due[todayN]=due; td_base[todayN]=base; td_pri[todayN]=pri
+          todayN++
+          td_due[todayN]  = due
+          td_base[todayN] = base
+          td_pri[todayN]  = pri
+          td_gate[todayN] = gate
         } else if (bucket=="tomorrow") {
-          tomN++; tm_due[tomN]=due; tm_base[tomN]=base; tm_pri[tomN]=pri
-        } else if (bucket=="this") {
-          tN++; t_due[tN]=due;  t_base[tN]=base; t_pri[tN]=pri
-        } else if (bucket=="next") {
-          nN++; n_due[nN]=due;  n_base[nN]=base; n_pri[nN]=pri
+          tomN++
+          tm_due[tomN]  = due
+          tm_base[tomN] = base
+          tm_pri[tomN]  = pri
+          tm_gate[tomN] = gate
+        } else if (bucket ~ /^w[0-8]$/) {
+          idx = substr(bucket, 2) + 0
+          wN[idx]++
+          w_due[idx, wN[idx]]  = due
+          w_base[idx, wN[idx]] = base
+          w_pri[idx, wN[idx]]  = pri
+          w_gate[idx, wN[idx]] = gate
         } else {
-          lN++; l_due[lN]=due;  l_base[lN]=base; l_pri[lN]=pri
+          laterN++
+          l_due[laterN]  = due
+          l_base[laterN] = base
+          l_pri[laterN]  = pri
+          l_gate[laterN] = gate
         }
       }
       END {
-        if (bdN>0) {
+        # BrainDump セクション
+        if (bdN > 0) {
           print "## 🔥 BrainDump（要整理）"
           print ""
-          for (i=1;i<=bdN;i++) print "- " bd_due[i] " " pri_icon(bd_pri[i]) " [[" bd_base[i] "]]"
+          for (i = 1; i <= bdN; i++) {
+            print "- " bd_due[i] " " combo_icon(bd_pri[i], bd_gate[i]) " [[" bd_base[i] "]]"
+          }
           print ""
         }
-        if (oN>0) {
+
+        # 期限切れ
+        if (oN > 0) {
           print "## ⏰ 期限切れ"
           print ""
-          for (i=1;i<=oN;i++) print "- " o_due[i] " " pri_icon(o_pri[i]) " [[" o_base[i] "]]"
+          for (i = 1; i <= oN; i++) {
+            print "- " o_due[i] " " combo_icon(o_pri[i], o_gate[i]) " [[" o_base[i] "]]"
+          }
           print ""
         }
-        if (todayN>0) {
+
+        # 今日
+        if (todayN > 0) {
           print "## 📌 今日"
           print ""
-          for (i=1;i<=todayN;i++) print "- " td_due[i] " " pri_icon(td_pri[i]) " [[" td_base[i] "]]"
+          for (i = 1; i <= todayN; i++) {
+            print "- " td_due[i] " " combo_icon(td_pri[i], td_gate[i]) " [[" td_base[i] "]]"
+          }
           print ""
         }
-        if (tomN>0) {
+
+        # 明日
+        if (tomN > 0) {
           print "## 📅 明日"
           print ""
-          for (i=1;i<=tomN;i++) print "- " tm_due[i] " " pri_icon(tm_pri[i]) " [[" tm_base[i] "]]"
+          for (i = 1; i <= tomN; i++) {
+            print "- " tm_due[i] " " combo_icon(tm_pri[i], tm_gate[i]) " [[" tm_base[i] "]]"
+          }
           print ""
         }
-        if (tN>0) {
-          print "## 📅 今週（今日・明日以外）"
-          print ""
-          for (i=1;i<=tN;i++) print "- " t_due[i] " " pri_icon(t_pri[i]) " [[" t_base[i] "]]"
-          print ""
+
+        # 週ごとの見出しラベル
+        labels[0] = "📅 今週（今日・明日以外）"
+        labels[1] = "📆 来週"
+        labels[2] = "📆 2週後"
+        labels[3] = "📆 3週後"
+        labels[4] = "📆 4週後"
+        labels[5] = "📆 5週後"
+        labels[6] = "📆 6週後"
+        labels[7] = "📆 7週後"
+        labels[8] = "📆 8週後"
+
+        # 週ごとの出力
+        for (idx = 0; idx <= 8; idx++) {
+          if (wN[idx] > 0) {
+            print "## " labels[idx]
+            print ""
+            for (j = 1; j <= wN[idx]; j++) {
+              print "- " w_due[idx, j] " " combo_icon(w_pri[idx, j], w_gate[idx, j]) " [[" w_base[idx, j] "]]"
+            }
+            print ""
+          }
         }
-        if (nN>0) {
-          print "## 📆 来週"
+
+        # 2ヶ月より先
+        if (laterN > 0) {
+          print "## 📌 2ヶ月より先"
           print ""
-          for (i=1;i<=nN;i++) print "- " n_due[i] " " pri_icon(n_pri[i]) " [[" n_base[i] "]]"
-          print ""
-        }
-        if (lN>0) {
-          print "## 📌 再来週以降"
-          print ""
-          for (i=1;i<=lN;i++) print "- " l_due[i] " " pri_icon(l_pri[i]) " [[" l_base[i] "]]"
+          for (i = 1; i <= laterN; i++) {
+            print "- " l_due[i] " " combo_icon(l_pri[i], l_gate[i]) " [[" l_base[i] "]]"
+          }
           print ""
         }
       }'
@@ -489,9 +530,9 @@ fi
     if [ -s "${tmp_nodue}" ]; then
       echo "## 📝 期限未設定"
       echo
-      # priority<TAB>isBrainDump<TAB>basename
+      # priority<TAB>isBrainDump<TAB>isGate<TAB>basename
       # BrainDump を 2列目降順で優先、その中で priority 昇順
-      sort -k2,2nr -k1,1n -k3,3 "${tmp_nodue}" | while IFS=$'\t' read -r pri bd base; do
+      sort -k2,2nr -k1,1n -k4,4 "${tmp_nodue}" | while IFS=$'\t' read -r pri bd gate base; do
         [ -z "${base}" ] && continue
         case "${pri}" in
           1) icon="🔴" ;;
@@ -499,6 +540,9 @@ fi
           3|"") icon="🟢" ;;  # 未指定も P3 扱い
           *) icon="⚪" ;;
         esac
+        if [ "${gate}" -gt 0 ] 2>/dev/null; then
+          icon="🚧${icon}"
+        fi
         echo "- ${icon} [[${base}]]"
       done
       echo
