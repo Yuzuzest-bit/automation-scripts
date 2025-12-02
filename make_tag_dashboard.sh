@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # make_tag_dashboard.sh
 #
-# frontmatter の due / closed / priority だけを見て、未クローズのノートを一覧化する。
+# frontmatter の due / closed / priority / due_source / due_weight だけを見て、未クローズのノートを一覧化する。
 #
 # タグ条件:
 #   - 引数 0個                → タグ条件なし, ROOT = $PWD
@@ -26,6 +26,13 @@
 #     - 2 / mid / p2     → 中 (🟠)
 #     - 3 / low / p3     → 低 (🟢)
 #     - 未指定 or 不明   → 低 (🟢, P3) 扱い
+#
+# due_source / due_weight:
+#   - frontmatter の due_source: / due_weight: を読む（任意）
+#     - due_source: self / other（無ければ self 扱い）
+#     - due_weight: hard / soft （無ければ soft 扱い）
+#   - 表示上はデフォルト(self+soft)は無表示、
+#     external や hard など「重たいもの」だけ [EXT][H] のようにラベルを付ける。
 #
 # 追加仕様1（BrainDump）:
 #   - frontmatter の tags: に "BrainDump"（大文字小文字無視）が含まれるノートは
@@ -58,11 +65,11 @@
 #   - いつでも dashboards/default_dashboard.md に上書き
 #   - 形式:
 #       ## 🔥 BrainDump（要整理）
-#       - 2025-11-20 🚧🔴 [[ノート名]]
+#       - 2025-11-20 🚧🔴 [EXT][H] [[ノート名]]
 #       ## ⏰ 期限切れ / 📌 今日 / 📅 明日 / 📅 今週 / ...
-#       - 2025-11-20 🔴 [[ノート名]]
+#       - 2025-11-20 🔴 [EXT][H] [[ノート名]]
 #       ## 📝 期限未設定
-#       - 🚧🟠 [[ノート名]]
+#       - 🚧🟠 [EXT][H] [[ノート名]]
 
 set -eu
 
@@ -127,7 +134,7 @@ find "${ROOT}" -type f -name '*.md' \
 # ------------------------------
 # 第1段階: frontmatter を読んで情報抽出
 #   - BrainDump / gate- タグ検出
-#   - due / closed / priority 読み取り
+#   - due / closed / priority / due_source / due_weight 読み取り
 #   - 条件を満たすノートを tmp_due / tmp_nodue へ
 # ------------------------------
 awk -v tag="${TAG}" -v out_due="${tmp_due}" -v out_nodue="${tmp_nodue}" '
@@ -160,6 +167,10 @@ NR==FNR {
   dueVal   = ""
   basename = ""
   priVal   = 3          # priority デフォルト (低)
+
+  # due_source / due_weight のデフォルト
+  srcVal   = "self"
+  wgtVal   = "soft"
 
   # ベース名取得（最後の / の後ろ、.md を削る）
   n = split(file, parts, "/")
@@ -238,9 +249,9 @@ NR==FNR {
 
       # due:
       if (index(copy, "due:") > 0) {
-        p = index(low, ":")
+        p = index(low, "due:")
         if (p > 0) {
-          tmp = trim(substr(low, p+1))
+          tmp = trim(substr(low, p+4))
           if (tmp ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}/) {
             dueVal = substr(tmp, 1, 10)
             hasDue = 1
@@ -270,6 +281,38 @@ NR==FNR {
           }
         }
       }
+
+      # due_source:
+      if (index(low, "due_source:") > 0) {
+        p = index(low, "due_source:")
+        if (p > 0) {
+          tmp = trim(substr(low, p + length("due_source:")))
+          # self / other を想定（それ以外は self 扱い）
+          if (tmp ~ /^other/) {
+            srcVal = "other"
+          } else if (tmp ~ /^self/) {
+            srcVal = "self"
+          } else {
+            srcVal = "self"
+          }
+        }
+      }
+
+      # due_weight:
+      if (index(low, "due_weight:") > 0) {
+        p = index(low, "due_weight:")
+        if (p > 0) {
+          tmp = trim(substr(low, p + length("due_weight:")))
+          # hard / soft を想定（それ以外は soft 扱い）
+          if (tmp ~ /^hard/) {
+            wgtVal = "hard"
+          } else if (tmp ~ /^soft/) {
+            wgtVal = "soft"
+          } else {
+            wgtVal = "soft"
+          }
+        }
+      }
     }
     # 本文は何も見ない
   }
@@ -290,12 +333,12 @@ NR==FNR {
   if (hasTag && !isClosed) {
     if (hasDue) {
       # due あり → tmp_due
-      #   due<TAB>priority<TAB>isBrainDump<TAB>isGate<TAB>basename
-      printf("%s\t%d\t%d\t%d\t%s\n", dueVal, priVal, isBrainDump, isGate, basename) >> out_due
+      #   due<TAB>priority<TAB>isBrainDump<TAB>isGate<TAB>due_source<TAB>due_weight<TAB>basename
+      printf("%s\t%d\t%d\t%d\t%s\t%s\t%s\n", dueVal, priVal, isBrainDump, isGate, srcVal, wgtVal, basename) >> out_due
     } else {
       # due なし → tmp_nodue
-      #   priority<TAB>isBrainDump<TAB>isGate<TAB>basename
-      printf("%d\t%d\t%d\t%s\n", priVal, isBrainDump, isGate, basename) >> out_nodue
+      #   priority<TAB>isBrainDump<TAB>isGate<TAB>due_source<TAB>due_weight<TAB>basename
+      printf("%d\t%d\t%d\t%s\t%s\t%s\n", priVal, isBrainDump, isGate, srcVal, wgtVal, basename) >> out_nodue
     }
   }
 
@@ -317,13 +360,14 @@ else
 fi
 
 {
-  echo "# ${HEADER_LABEL} – 未クローズタスク (2ヶ月先まで週単位 + BrainDump優先 + gateアイコン)"
+  echo "# ${HEADER_LABEL} – 未クローズタスク (2ヶ月先まで週単位 + BrainDump優先 + gateアイコン + due_source/due_weight)"
   echo
   echo "- 生成時刻: $(date '+%Y-%m-%d %H:%M')"
   echo "- 条件: ${CONDITION_TEXT}"
   echo "- priority: 1(高, 🔴) / 2(中, 🟠) / 3(低, 🟢), 未指定は 3(低, 🟢) 扱い"
   echo "- BrainDump タグ付きノートは 🔥 セクションに表示"
   echo "- gate-* タグ付きノートは 🚧🔴 のようにアイコンで目立つ"
+  echo "- due_source / due_weight: 外部かつハードなど、デフォルト以外のみ [EXT][H] のようにラベル表示"
   echo
 
   if [ ! -s "${tmp_due}" ] && [ ! -s "${tmp_nodue}" ]; then
@@ -331,9 +375,11 @@ fi
   else
     # ---------- 期限付き ----------
     if [ -s "${tmp_due}" ]; then
+      # フィールド構成:
+      # 1:due 2:pri 3:isBrainDump 4:isGate 5:due_source 6:due_weight 7:basename
       # isBrainDump(3列目) 降順 → BrainDump が先頭、
       # その中で due 昇順, priority 昇順, basename 降順
-      sort -k3,3nr -k1,1 -k2,2n -k5,5r "${tmp_due}" | awk -F '\t' -v today="${TODAY}" '
+      sort -k3,3nr -k1,1 -k2,2n -k7,7r "${tmp_due}" | awk -F '\t' -v today="${TODAY}" '
       function ymd_to_jdn(s,    Y,M,D,a,y,m) {
         if (s == "" || length(s) < 10) return 0
         Y = substr(s,1,4) + 0
@@ -355,6 +401,23 @@ fi
         if (gateFlag > 0) return "🚧" base
         else              return base
       }
+      # due_source / due_weight のラベル
+      #  - デフォルト(self + soft)なら空文字
+      #  - other や hard などは [EXT][H] のように表示
+      function meta_label(src, wgt,    s) {
+        s = ""
+        if (src == "other") {
+          s = s "[EXT]"
+        } else if (src != "" && src != "self") {
+          s = s "[" src "]"
+        }
+        if (wgt == "hard") {
+          s = s "[H]"
+        } else if (wgt != "" && wgt != "soft") {
+          s = s "[" wgt "]"
+        }
+        return s
+      }
       BEGIN {
         todayJ = ymd_to_jdn(today)
 
@@ -370,7 +433,9 @@ fi
         pri   = $2 + 0
         bd    = $3 + 0
         gate  = $4 + 0
-        base  = $5
+        src   = $5
+        wgt   = $6
+        base  = $7
 
         if (due !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}/) next
 
@@ -381,6 +446,8 @@ fi
           bd_base[bdN] = base
           bd_pri[bdN]  = pri
           bd_gate[bdN] = gate
+          bd_src[bdN]  = src
+          bd_wgt[bdN]  = wgt
           next
         }
 
@@ -419,35 +486,45 @@ fi
 
         if (bucket=="over") {
           oN++
-          o_due[oN]  = due
-          o_base[oN] = base
-          o_pri[oN]  = pri
-          o_gate[oN] = gate
+          o_due[oN]   = due
+          o_base[oN]  = base
+          o_pri[oN]   = pri
+          o_gate[oN]  = gate
+          o_src[oN]   = src
+          o_wgt[oN]   = wgt
         } else if (bucket=="today") {
           todayN++
-          td_due[todayN]  = due
-          td_base[todayN] = base
-          td_pri[todayN]  = pri
-          td_gate[todayN] = gate
+          td_due[todayN]   = due
+          td_base[todayN]  = base
+          td_pri[todayN]   = pri
+          td_gate[todayN]  = gate
+          td_src[todayN]   = src
+          td_wgt[todayN]   = wgt
         } else if (bucket=="tomorrow") {
           tomN++
-          tm_due[tomN]  = due
-          tm_base[tomN] = base
-          tm_pri[tomN]  = pri
-          tm_gate[tomN] = gate
-        } else if (bucket ~ /^w[0-8]$/) {
+          tm_due[tomN]   = due
+          tm_base[tomN]  = base
+          tm_pri[tomN]   = pri
+          tm_gate[tomN]  = gate
+          tm_src[tomN]   = src
+          tm_wgt[tomN]   = wgt
+        } else if (bucket~ /^w[0-8]$/) {
           idx = substr(bucket, 2) + 0
           wN[idx]++
-          w_due[idx, wN[idx]]  = due
-          w_base[idx, wN[idx]] = base
-          w_pri[idx, wN[idx]]  = pri
-          w_gate[idx, wN[idx]] = gate
+          w_due[idx, wN[idx]]   = due
+          w_base[idx, wN[idx]]  = base
+          w_pri[idx, wN[idx]]   = pri
+          w_gate[idx, wN[idx]]  = gate
+          w_src[idx, wN[idx]]   = src
+          w_wgt[idx, wN[idx]]   = wgt
         } else {
           laterN++
-          l_due[laterN]  = due
-          l_base[laterN] = base
-          l_pri[laterN]  = pri
-          l_gate[laterN] = gate
+          l_due[laterN]   = due
+          l_base[laterN]  = base
+          l_pri[laterN]   = pri
+          l_gate[laterN]  = gate
+          l_src[laterN]   = src
+          l_wgt[laterN]   = wgt
         }
       }
       END {
@@ -456,7 +533,7 @@ fi
           print "## 🔥 BrainDump（要整理）"
           print ""
           for (i = 1; i <= bdN; i++) {
-            print "- " bd_due[i] " " combo_icon(bd_pri[i], bd_gate[i]) " [[" bd_base[i] "]]"
+            print "- " bd_due[i] " " combo_icon(bd_pri[i], bd_gate[i]) " " meta_label(bd_src[i], bd_wgt[i]) " [[" bd_base[i] "]]"
           }
           print ""
         }
@@ -466,7 +543,7 @@ fi
           print "## ⏰ 期限切れ"
           print ""
           for (i = 1; i <= oN; i++) {
-            print "- " o_due[i] " " combo_icon(o_pri[i], o_gate[i]) " [[" o_base[i] "]]"
+            print "- " o_due[i] " " combo_icon(o_pri[i], o_gate[i]) " " meta_label(o_src[i], o_wgt[i]) " [[" o_base[i] "]]"
           }
           print ""
         }
@@ -476,7 +553,7 @@ fi
           print "## 📌 今日"
           print ""
           for (i = 1; i <= todayN; i++) {
-            print "- " td_due[i] " " combo_icon(td_pri[i], td_gate[i]) " [[" td_base[i] "]]"
+            print "- " td_due[i] " " combo_icon(td_pri[i], td_gate[i]) " " meta_label(td_src[i], td_wgt[i]) " [[" td_base[i] "]]"
           }
           print ""
         }
@@ -486,7 +563,7 @@ fi
           print "## 📅 明日"
           print ""
           for (i = 1; i <= tomN; i++) {
-            print "- " tm_due[i] " " combo_icon(tm_pri[i], tm_gate[i]) " [[" tm_base[i] "]]"
+            print "- " tm_due[i] " " combo_icon(tm_pri[i], tm_gate[i]) " " meta_label(tm_src[i], tm_wgt[i]) " [[" tm_base[i] "]]"
           }
           print ""
         }
@@ -508,7 +585,7 @@ fi
             print "## " labels[idx]
             print ""
             for (j = 1; j <= wN[idx]; j++) {
-              print "- " w_due[idx, j] " " combo_icon(w_pri[idx, j], w_gate[idx, j]) " [[" w_base[idx, j] "]]"
+              print "- " w_due[idx, j] " " combo_icon(w_pri[idx, j], w_gate[idx, j]) " " meta_label(w_src[idx, j], w_wgt[idx, j]) " [[" w_base[idx, j] "]]"
             }
             print ""
           }
@@ -519,7 +596,7 @@ fi
           print "## 📌 2ヶ月より先"
           print ""
           for (i = 1; i <= laterN; i++) {
-            print "- " l_due[i] " " combo_icon(l_pri[i], l_gate[i]) " [[" l_base[i] "]]"
+            print "- " l_due[i] " " combo_icon(l_pri[i], l_gate[i]) " " meta_label(l_src[i], l_wgt[i]) " [[" l_base[i] "]]"
           }
           print ""
         }
@@ -530,21 +607,52 @@ fi
     if [ -s "${tmp_nodue}" ]; then
       echo "## 📝 期限未設定"
       echo
-      # priority<TAB>isBrainDump<TAB>isGate<TAB>basename
+      # priority<TAB>isBrainDump<TAB>isGate<TAB>due_source<TAB>due_weight<TAB>basename
       # BrainDump を 2列目降順で優先、その中で priority 昇順
-      sort -k2,2nr -k1,1n -k4,4 "${tmp_nodue}" | while IFS=$'\t' read -r pri bd gate base; do
-        [ -z "${base}" ] && continue
-        case "${pri}" in
-          1) icon="🔴" ;;
-          2) icon="🟠" ;;
-          3|"") icon="🟢" ;;  # 未指定も P3 扱い
-          *) icon="⚪" ;;
-        esac
-        if [ "${gate}" -gt 0 ] 2>/dev/null; then
-          icon="🚧${icon}"
-        fi
-        echo "- ${icon} [[${base}]]"
-      done
+      sort -k2,2nr -k1,1n -k6,6 "${tmp_nodue}" | awk -F '\t' '
+        function pri_icon(p) {
+          if (p <= 1)      return "🔴"
+          else if (p == 2) return "🟠"
+          else if (p >= 3) return "🟢"
+          else             return "⚪"
+        }
+        function meta_label(src, wgt,    s) {
+          s = ""
+          if (src == "other") {
+            s = s "[EXT]"
+          } else if (src != "" && src != "self") {
+            s = s "[" src "]"
+          }
+          if (wgt == "hard") {
+            s = s "[H]"
+          } else if (wgt != "" && wgt != "soft") {
+            s = s "[" wgt "]"
+          }
+          return s
+        }
+        {
+          pri  = $1 + 0
+          bd   = $2 + 0
+          gate = $3 + 0
+          src  = $4
+          wgt  = $5
+          base = $6
+
+          if (base == "") next
+
+          icon = pri_icon(pri)
+          if (gate > 0) {
+            icon = "🚧" icon
+          }
+
+          label = meta_label(src, wgt)
+          if (label != "") {
+            print "- " icon " " label " [[" base "]]"
+          } else {
+            print "- " icon " [[" base "]]"
+          }
+        }
+      '
       echo
     fi
   fi
