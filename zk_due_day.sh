@@ -49,31 +49,41 @@ trap cleanup EXIT
 
 awk -v d="${TARGET_DATE}" '
 BEGIN {
-  in_fm = 0
-  found_due = 0
+  in_fm     = 0   # frontmatter の中かどうか
+  fm_done   = 0   # 一番上の frontmatter を処理し終わったか
+  found_due = 0   # その frontmatter 内に due: があったか
 }
+
 # frontmatter の境界 --- を検出
 /^---[ \t]*$/ {
-  if (in_fm == 0) {
-    # 開始側 ---
-    in_fm = 1
-    found_due = 0
-    print
-  } else {
-    # 終了側 ---
-    if (found_due == 0) {
-      # due: がまだ無ければここで追加してから閉じる
-      print "due: " d
+  # まだ一番上の frontmatter を処理中
+  if (fm_done == 0) {
+    if (in_fm == 0) {
+      # 開始側 ---
+      in_fm = 1
+      print
+    } else {
+      # 終了側 ---
+      if (found_due == 0) {
+        # due: がまだ無ければここで追加してから閉じる
+        print "due: " d
+      }
+      in_fm   = 0
+      fm_done = 1
+      print
     }
-    in_fm = 0
+  } else {
+    # 一番上の frontmatter 処理後の --- は
+    # 単なる本文の区切りとしてそのまま出力
     print
   }
   next
 }
 
 {
-  if (in_fm == 1 && $0 ~ /^due:[ \t]*[0-9]{4}-[0-9]{2}-[0-9]{2}[ \t]*$/) {
-    # frontmatter 内の due: YYYY-MM-DD 行だけを置き換える
+  if (in_fm == 1 &&
+      $0 ~ /^due:[ \t]*[0-9]{4}-[0-9]{2}-[0-9]{2}[ \t]*$/) {
+    # 一番上の frontmatter 内の due: YYYY-MM-DD 行だけを置き換える
     print "due: " d
     found_due = 1
   } else {
