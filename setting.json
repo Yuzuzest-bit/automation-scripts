@@ -30,6 +30,11 @@
     "search_tag issue": "\"C:/Program Files/Git/git-bash.exe\" -lc \"cd /C/work/dev/aaaaa; ./search_tag.sh issue -zk-archive && code -r /C/work/dev/aaaaa/dashboards/tags_search.md\"",
 
     "search-children-from-list": "/bin/zsh -lc 'ROOT=\"${workspaceFolder}\"; cd \"$ROOT\"; ./search_children_from_list.sh \"${file}\" \"$ROOT/tags/child_search_keywords.md\" \"$ROOT\"; code -r \"$ROOT/dashboards/children_search.md\"'"
-    
+
+    // 例: 外部ハード期限としてマーク
+    "set due other hard": "/bin/zsh -lc 'ROOT=\"${workspaceFolder}\"; [ -z \"$ROOT\" ] && ROOT=\"/Users/a.s./Documents/inidivi-valt\"; cd \"$ROOT\"; ./zk_due_meta.sh \"${file}\" other hard'",
+  
+    // 自分のソフト期限としてマーク（デフォルト self/soft 利用）
+    "set due self soft": "/bin/zsh -lc 'ROOT=\"${workspaceFolder}\"; [ -z \"$ROOT\" ] && ROOT=\"/Users/a.s./Documents/inidivi-valt\"; cd \"$ROOT\"; ./zk_due_meta.sh \"${file}\"'"
   }
 }
