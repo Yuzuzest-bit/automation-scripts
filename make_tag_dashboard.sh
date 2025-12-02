@@ -31,8 +31,11 @@
 #   - frontmatter の due_source: / due_weight: を読む（任意）
 #     - due_source: self / other（無ければ self 扱い）
 #     - due_weight: hard / soft （無ければ soft 扱い）
-#   - 表示上はデフォルト(self+soft)は無表示、
-#     external や hard など「重たいもの」だけ [EXT][H] のようにラベルを付ける。
+#   - 表示上は:
+#       * self + soft → 何も表示しない（デフォルト）
+#       * other      → 🤝
+#       * hard       → ⚠️
+#       → 組み合わせで「🤝⚠️」のように表示
 #
 # 追加仕様1（BrainDump）:
 #   - frontmatter の tags: に "BrainDump"（大文字小文字無視）が含まれるノートは
@@ -65,11 +68,11 @@
 #   - いつでも dashboards/default_dashboard.md に上書き
 #   - 形式:
 #       ## 🔥 BrainDump（要整理）
-#       - 2025-11-20 🚧🔴 [EXT][H] [[ノート名]]
+#       - 2025-11-20 🚧🔴 🤝⚠️ [[ノート名]]
 #       ## ⏰ 期限切れ / 📌 今日 / 📅 明日 / 📅 今週 / ...
-#       - 2025-11-20 🔴 [EXT][H] [[ノート名]]
+#       - 2025-11-20 🔴 🤝⚠️ [[ノート名]]
 #       ## 📝 期限未設定
-#       - 🚧🟠 [EXT][H] [[ノート名]]
+#       - 🚧🟠 🤝⚠️ [[ノート名]]
 
 set -eu
 
@@ -133,9 +136,6 @@ find "${ROOT}" -type f -name '*.md' \
 
 # ------------------------------
 # 第1段階: frontmatter を読んで情報抽出
-#   - BrainDump / gate- タグ検出
-#   - due / closed / priority / due_source / due_weight 読み取り
-#   - 条件を満たすノートを tmp_due / tmp_nodue へ
 # ------------------------------
 awk -v tag="${TAG}" -v out_due="${tmp_due}" -v out_nodue="${tmp_nodue}" '
 function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
@@ -237,12 +237,12 @@ NR==FNR {
         }
       }
 
-      # BrainDump タグ検出（tags: 行に "braindump" を含んでいればフラグON）
+      # BrainDump タグ検出
       if (index(low, "tags:") > 0 && index(low, "braindump") > 0) {
         isBrainDump = 1
       }
 
-      # gate- タグ検出（例: gate-release, gate-final）
+      # gate- タグ検出
       if (index(low, "tags:") > 0 && index(low, "gate-") > 0) {
         isGate = 1
       }
@@ -287,7 +287,6 @@ NR==FNR {
         p = index(low, "due_source:")
         if (p > 0) {
           tmp = trim(substr(low, p + length("due_source:")))
-          # self / other を想定（それ以外は self 扱い）
           if (tmp ~ /^other/) {
             srcVal = "other"
           } else if (tmp ~ /^self/) {
@@ -303,7 +302,6 @@ NR==FNR {
         p = index(low, "due_weight:")
         if (p > 0) {
           tmp = trim(substr(low, p + length("due_weight:")))
-          # hard / soft を想定（それ以外は soft 扱い）
           if (tmp ~ /^hard/) {
             wgtVal = "hard"
           } else if (tmp ~ /^soft/) {
@@ -314,7 +312,6 @@ NR==FNR {
         }
       }
     }
-    # 本文は何も見ない
   }
   close(file)
 
@@ -328,16 +325,12 @@ NR==FNR {
     priVal = 1
   }
 
-  # hasTag: タグ条件を満たす（or タグ指定なし）
-  # !isClosed: frontmatter に closed: が無い
   if (hasTag && !isClosed) {
     if (hasDue) {
-      # due あり → tmp_due
-      #   due<TAB>priority<TAB>isBrainDump<TAB>isGate<TAB>due_source<TAB>due_weight<TAB>basename
+      # due あり: due, pri, bd, gate, src, wgt, basename
       printf("%s\t%d\t%d\t%d\t%s\t%s\t%s\n", dueVal, priVal, isBrainDump, isGate, srcVal, wgtVal, basename) >> out_due
     } else {
-      # due なし → tmp_nodue
-      #   priority<TAB>isBrainDump<TAB>isGate<TAB>due_source<TAB>due_weight<TAB>basename
+      # due なし: pri, bd, gate, src, wgt, basename
       printf("%d\t%d\t%d\t%s\t%s\t%s\n", priVal, isBrainDump, isGate, srcVal, wgtVal, basename) >> out_nodue
     }
   }
@@ -350,7 +343,6 @@ NR==FNR {
 # 第2段階: tmp_due / tmp_nodue を使って Markdown 出力
 # ------------------------------
 
-# 見出し用ラベル
 if [ -z "${TAG}" ]; then
   HEADER_LABEL="All Tags"
   CONDITION_TEXT="先頭 frontmatter に closed: が無いノート（due: が無ければ期限未設定扱い）"
@@ -367,7 +359,7 @@ fi
   echo "- priority: 1(高, 🔴) / 2(中, 🟠) / 3(低, 🟢), 未指定は 3(低, 🟢) 扱い"
   echo "- BrainDump タグ付きノートは 🔥 セクションに表示"
   echo "- gate-* タグ付きノートは 🚧🔴 のようにアイコンで目立つ"
-  echo "- due_source / due_weight: 外部かつハードなど、デフォルト以外のみ [EXT][H] のようにラベル表示"
+  echo "- due_source / due_weight: other → 🤝, hard → ⚠️（self+soft は表示なし）"
   echo
 
   if [ ! -s "${tmp_due}" ] && [ ! -s "${tmp_nodue}" ]; then
@@ -375,10 +367,6 @@ fi
   else
     # ---------- 期限付き ----------
     if [ -s "${tmp_due}" ]; then
-      # フィールド構成:
-      # 1:due 2:pri 3:isBrainDump 4:isGate 5:due_source 6:due_weight 7:basename
-      # isBrainDump(3列目) 降順 → BrainDump が先頭、
-      # その中で due 昇順, priority 昇順, basename 降順
       sort -k3,3nr -k1,1 -k2,2n -k7,7r "${tmp_due}" | awk -F '\t' -v today="${TODAY}" '
       function ymd_to_jdn(s,    Y,M,D,a,y,m) {
         if (s == "" || length(s) < 10) return 0
@@ -401,20 +389,18 @@ fi
         if (gateFlag > 0) return "🚧" base
         else              return base
       }
-      # due_source / due_weight のラベル
-      #  - デフォルト(self + soft)なら空文字
-      #  - other や hard などは [EXT][H] のように表示
-      function meta_label(src, wgt,    s) {
+      # due_source / due_weight を絵文字に変換
+      function meta_icon(src, wgt,    s) {
         s = ""
         if (src == "other") {
-          s = s "[EXT]"
+          s = s "🤝"
         } else if (src != "" && src != "self") {
-          s = s "[" src "]"
+          s = s "📎"
         }
         if (wgt == "hard") {
-          s = s "[H]"
+          s = s "⚠️"
         } else if (wgt != "" && wgt != "soft") {
-          s = s "[" wgt "]"
+          s = s "❓"
         }
         return s
       }
@@ -423,7 +409,7 @@ fi
 
         oN = todayN = tomN = 0
         for (i = 0; i <= 8; i++) {
-          wN[i] = 0  # w0..w8 まで（今週〜8週後）
+          wN[i] = 0
         }
         laterN = 0
         bdN    = 0
@@ -439,7 +425,6 @@ fi
 
         if (due !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}/) next
 
-        # BrainDump は専用セクションへ
         if (bd == 1) {
           bdN++
           bd_due[bdN]  = due
@@ -455,7 +440,7 @@ fi
         diff = dJ - todayJ
 
         if (dJ == 0) {
-          bucket = "later"  # フォーマット異常時はとりあえず「2ヶ月より先」扱い
+          bucket = "later"
         } else if (diff < 0) {
           bucket = "over"
         } else if (diff == 0) {
@@ -463,25 +448,25 @@ fi
         } else if (diff == 1) {
           bucket = "tomorrow"
         } else if (diff <= 6) {
-          bucket = "w0"     # 今週（今日・明日以外）
+          bucket = "w0"
         } else if (diff <= 13) {
-          bucket = "w1"     # 来週
+          bucket = "w1"
         } else if (diff <= 20) {
-          bucket = "w2"     # 2週後
+          bucket = "w2"
         } else if (diff <= 27) {
-          bucket = "w3"     # 3週後
+          bucket = "w3"
         } else if (diff <= 34) {
-          bucket = "w4"     # 4週後
+          bucket = "w4"
         } else if (diff <= 41) {
-          bucket = "w5"     # 5週後
+          bucket = "w5"
         } else if (diff <= 48) {
-          bucket = "w6"     # 6週後
+          bucket = "w6"
         } else if (diff <= 55) {
-          bucket = "w7"     # 7週後
+          bucket = "w7"
         } else if (diff <= 60) {
-          bucket = "w8"     # 8週後
+          bucket = "w8"
         } else {
-          bucket = "later"  # 2ヶ月より先
+          bucket = "later"
         }
 
         if (bucket=="over") {
@@ -528,12 +513,17 @@ fi
         }
       }
       END {
-        # BrainDump セクション
+        # BrainDump
         if (bdN > 0) {
           print "## 🔥 BrainDump（要整理）"
           print ""
           for (i = 1; i <= bdN; i++) {
-            print "- " bd_due[i] " " combo_icon(bd_pri[i], bd_gate[i]) " " meta_label(bd_src[i], bd_wgt[i]) " [[" bd_base[i] "]]"
+            mi = meta_icon(bd_src[i], bd_wgt[i])
+            if (mi != "") {
+              print "- " bd_due[i] " " combo_icon(bd_pri[i], bd_gate[i]) " " mi " [[" bd_base[i] "]]"
+            } else {
+              print "- " bd_due[i] " " combo_icon(bd_pri[i], bd_gate[i]) " [[" bd_base[i] "]]"
+            }
           }
           print ""
         }
@@ -543,7 +533,12 @@ fi
           print "## ⏰ 期限切れ"
           print ""
           for (i = 1; i <= oN; i++) {
-            print "- " o_due[i] " " combo_icon(o_pri[i], o_gate[i]) " " meta_label(o_src[i], o_wgt[i]) " [[" o_base[i] "]]"
+            mi = meta_icon(o_src[i], o_wgt[i])
+            if (mi != "") {
+              print "- " o_due[i] " " combo_icon(o_pri[i], o_gate[i]) " " mi " [[" o_base[i] "]]"
+            } else {
+              print "- " o_due[i] " " combo_icon(o_pri[i], o_gate[i]) " [[" o_base[i] "]]"
+            }
           }
           print ""
         }
@@ -553,7 +548,12 @@ fi
           print "## 📌 今日"
           print ""
           for (i = 1; i <= todayN; i++) {
-            print "- " td_due[i] " " combo_icon(td_pri[i], td_gate[i]) " " meta_label(td_src[i], td_wgt[i]) " [[" td_base[i] "]]"
+            mi = meta_icon(td_src[i], td_wgt[i])
+            if (mi != "") {
+              print "- " td_due[i] " " combo_icon(td_pri[i], td_gate[i]) " " mi " [[" td_base[i] "]]"
+            } else {
+              print "- " td_due[i] " " combo_icon(td_pri[i], td_gate[i]) " [[" td_base[i] "]]"
+            }
           }
           print ""
         }
@@ -563,12 +563,17 @@ fi
           print "## 📅 明日"
           print ""
           for (i = 1; i <= tomN; i++) {
-            print "- " tm_due[i] " " combo_icon(tm_pri[i], tm_gate[i]) " " meta_label(tm_src[i], tm_wgt[i]) " [[" tm_base[i] "]]"
+            mi = meta_icon(tm_src[i], tm_wgt[i])
+            if (mi != "") {
+              print "- " tm_due[i] " " combo_icon(tm_pri[i], tm_gate[i]) " " mi " [[" tm_base[i] "]]"
+            } else {
+              print "- " tm_due[i] " " combo_icon(tm_pri[i], tm_gate[i]) " [[" tm_base[i] "]]"
+            }
           }
           print ""
         }
 
-        # 週ごとの見出しラベル
+        # 週ラベル
         labels[0] = "📅 今週（今日・明日以外）"
         labels[1] = "📆 来週"
         labels[2] = "📆 2週後"
@@ -579,13 +584,17 @@ fi
         labels[7] = "📆 7週後"
         labels[8] = "📆 8週後"
 
-        # 週ごとの出力
         for (idx = 0; idx <= 8; idx++) {
           if (wN[idx] > 0) {
             print "## " labels[idx]
             print ""
             for (j = 1; j <= wN[idx]; j++) {
-              print "- " w_due[idx, j] " " combo_icon(w_pri[idx, j], w_gate[idx, j]) " " meta_label(w_src[idx, j], w_wgt[idx, j]) " [[" w_base[idx, j] "]]"
+              mi = meta_icon(w_src[idx, j], w_wgt[idx, j])
+              if (mi != "") {
+                print "- " w_due[idx, j] " " combo_icon(w_pri[idx, j], w_gate[idx, j]) " " mi " [[" w_base[idx, j] "]]"
+              } else {
+                print "- " w_due[idx, j] " " combo_icon(w_pri[idx, j], w_gate[idx, j]) " [[" w_base[idx, j] "]]"
+              }
             }
             print ""
           }
@@ -596,7 +605,12 @@ fi
           print "## 📌 2ヶ月より先"
           print ""
           for (i = 1; i <= laterN; i++) {
-            print "- " l_due[i] " " combo_icon(l_pri[i], l_gate[i]) " " meta_label(l_src[i], l_wgt[i]) " [[" l_base[i] "]]"
+            mi = meta_icon(l_src[i], l_wgt[i])
+            if (mi != "") {
+              print "- " l_due[i] " " combo_icon(l_pri[i], l_gate[i]) " " mi " [[" l_base[i] "]]"
+            } else {
+              print "- " l_due[i] " " combo_icon(l_pri[i], l_gate[i]) " [[" l_base[i] "]]"
+            }
           }
           print ""
         }
@@ -607,8 +621,6 @@ fi
     if [ -s "${tmp_nodue}" ]; then
       echo "## 📝 期限未設定"
       echo
-      # priority<TAB>isBrainDump<TAB>isGate<TAB>due_source<TAB>due_weight<TAB>basename
-      # BrainDump を 2列目降順で優先、その中で priority 昇順
       sort -k2,2nr -k1,1n -k6,6 "${tmp_nodue}" | awk -F '\t' '
         function pri_icon(p) {
           if (p <= 1)      return "🔴"
@@ -616,23 +628,23 @@ fi
           else if (p >= 3) return "🟢"
           else             return "⚪"
         }
-        function meta_label(src, wgt,    s) {
+        function meta_icon(src, wgt,    s) {
           s = ""
           if (src == "other") {
-            s = s "[EXT]"
+            s = s "🤝"
           } else if (src != "" && src != "self") {
-            s = s "[" src "]"
+            s = s "📎"
           }
           if (wgt == "hard") {
-            s = s "[H]"
+            s = s "⚠️"
           } else if (wgt != "" && wgt != "soft") {
-            s = s "[" wgt "]"
+            s = s "❓"
           }
           return s
         }
         {
           pri  = $1 + 0
-          bd   = $2 + 0
+          bd   = $2 + 0   # いまのところ未使用
           gate = $3 + 0
           src  = $4
           wgt  = $5
@@ -645,9 +657,9 @@ fi
             icon = "🚧" icon
           }
 
-          label = meta_label(src, wgt)
-          if (label != "") {
-            print "- " icon " " label " [[" base "]]"
+          mi = meta_icon(src, wgt)
+          if (mi != "") {
+            print "- " icon " " mi " [[" base "]]"
           } else {
             print "- " icon " [[" base "]]"
           }
