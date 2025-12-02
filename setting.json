@@ -36,5 +36,7 @@
   
     // 自分のソフト期限としてマーク（デフォルト self/soft 利用）
     "set due self soft": "/bin/zsh -lc 'ROOT=\"${workspaceFolder}\"; [ -z \"$ROOT\" ] && ROOT=\"/Users/a.s./Documents/inidivi-valt\"; cd \"$ROOT\"; ./zk_due_meta.sh \"${file}\"'"
+
+  "due:set-self-soft": "\"C:/Program Files/Git/git-bash.exe\" -lc \"/C/work/dev/aaaaa/zk_due_meta.sh \\\"${file}\\\"\"",
   }
 }
