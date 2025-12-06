@@ -1,0 +1,39 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "zk: apply tag preset",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "${workspaceFolder}/zk_apply_preset_from_pick.sh",
+        "${file}",
+        "${input:zkPreset}",
+        "${workspaceFolder}"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "never",
+        "panel": "shared",
+        "clear": false
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "zkPreset",
+      "type": "pickString",
+      "description": "ZK preset を選択（説明つき）",
+      "options": [
+        "issue | 今困っていること・解決すべき課題 | +issue",
+        "analysis | 背景・因果・整理・検討メモ | +analysis",
+        "decision | 意思決定の記録 | +decision",
+        "pme_hub | PMEのハブノート化（fleeting除去） | +zk-permanent +ctx-pme +hub -zk-fleeting",
+        "pme_past_am1 | AM1過去問ノートへ寄せる | +ctx-exam +ctx-exam-pme +past-pme +pme-am1 +zk-seed -zk-fleeting",
+        "pme_past_am2 | AM2過去問ノートへ寄せる | +ctx-exam +ctx-exam-pme +past-pme +pme-am2 +zk-seed -zk-fleeting",
+        "pme_knowledge | PME知識ノート本体へ寄せる | +ctx-exam +ctx-exam-pme +pme-knowledge +zk-permanent -zk-fleeting"
+      ],
+      "default": "issue | 今困っていること・解決すべき課題 | +issue"
+    }
+  ]
+}
