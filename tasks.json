@@ -2,7 +2,23 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "zk: apply tag preset",
+      "label": "zk: search tag (ad hoc)",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "${workspaceFolder}/zk_search_tag_ad_hoc.sh",
+        "${input:zkAdHocTags}",
+        "${workspaceFolder}"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "never",
+        "panel": "shared"
+      }
+    },
+
+    {
+      "label": "add_tag",
       "type": "shell",
       "command": "bash",
       "args": [
@@ -11,11 +27,38 @@
         "${input:zkPreset}",
         "${workspaceFolder}"
       ],
+      "problemMatcher": []
+    },
+
+    {
+      "label": "zk: search tag preset",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "${workspaceFolder}/zk_search_tag_from_pick.sh",
+        "${input:zkSearch}",
+        "${workspaceFolder}"
+      ],
       "problemMatcher": [],
       "presentation": {
         "reveal": "never",
-        "panel": "shared",
-        "clear": false
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "zk: search tag + text",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "${workspaceFolder}/zk_search_tag_text_from_pick.sh",
+        "${input:zkSearch}",
+        "${input:zkSearchText}",
+        "${workspaceFolder}"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "never",
+        "panel": "shared"
       }
     }
   ],
@@ -25,15 +68,59 @@
       "type": "pickString",
       "description": "ZK preset を選択（説明つき）",
       "options": [
+        // =================================================================
+        // 追加タグの一覧
+        // =================================================================
         "issue | 今困っていること・解決すべき課題 | +issue",
         "analysis | 背景・因果・整理・検討メモ | +analysis",
         "decision | 意思決定の記録 | +decision",
         "pme_hub | PMEのハブノート化（fleeting除去） | +zk-permanent +ctx-pme +hub -zk-fleeting",
-        "pme_past_am1 | AM1過去問ノートへ寄せる | +ctx-exam +ctx-exam-pme +past-pme +pme-am1 +zk-seed -zk-fleeting",
-        "pme_past_am2 | AM2過去問ノートへ寄せる | +ctx-exam +ctx-exam-pme +past-pme +pme-am2 +zk-seed -zk-fleeting",
-        "pme_knowledge | PME知識ノート本体へ寄せる | +ctx-exam +ctx-exam-pme +pme-knowledge +zk-permanent -zk-fleeting"
+        "mng-task | タスク管理について |  mng-task  zk-fleeting"
       ],
       "default": "issue | 今困っていること・解決すべき課題 | +issue"
+    },
+
+    {
+      "id": "zkSearch",
+      "type": "pickString",
+      "description": "タグ検索プリセットを選択",
+      "options": [
+        // =================================================================
+        // 検索一覧
+        // =================================================================
+        "all | ",
+        "issue全般 | issue -zk-archive",
+        "decision全般 | decision",
+        "analysis全般 | analysis",
+
+        "ZK: fleeting | zk-fleeting",
+        "ZK: seed | zk-seed",
+        "ZK: permanent | zk-permanent",
+        "ZK: evergreen | zk-evergreen",
+
+        "生活系 | ctx-life -zk-archive",
+
+        "PME: 全体 | ctx-exam ctx-exam-pme",
+        "PME: AM1 解答済 | ctx-exam ctx-exam-pme past-pme pme-am1 -zk-fleeting zk-seed",
+        "PME: AM2 解答済 | ctx-exam ctx-exam-pme past-pme pme-am2 -zk-fleeting zk-seed",
+        "PME: knowledge | pme-knowledge",
+
+        "ZK: | zk-seed, mng-task, analysis"
+      ],
+      "default": "issue全般 | issue -zk-archive"
+    },
+    {
+      "id": "zkSearchText",
+      "type": "promptString",
+      "description": "本文に含まれるキーワード（空ならタグ検索のみ）",
+      "default": ""
+    },
+    {
+      "id": "zkAdHocTags",
+      "type": "promptString",
+      "description": "タグ検索クエリ（例: issue -zk-archive / ctx-exam ctx-exam-pme）",
+      "default": ""
     }
+
   ]
 }
