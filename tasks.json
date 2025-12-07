@@ -3,13 +3,18 @@
   "tasks": [
     {
       "label": "zk: search tag (ad hoc)",
-      "type": "shell",
+      "type": "process",
       "command": "bash",
+      "windows": {
+        "command": "C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe"
+      },
       "args": [
-        "${workspaceFolder}/zk_search_tag_ad_hoc.sh",
-        "${input:zkAdHocTags}",
-        "${workspaceFolder}"
+        "-lc",
+        "./zk_search_tag_ad_hoc.sh \"${input:zkAdHocTags}\""
       ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
       "problemMatcher": [],
       "presentation": {
         "reveal": "never",
@@ -19,42 +24,56 @@
 
     {
       "label": "add_tag",
-      "type": "shell",
+      "type": "process",
       "command": "bash",
+      "windows": {
+        "command": "C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe"
+      },
       "args": [
-        "${workspaceFolder}/zk_apply_preset_from_pick.sh",
-        "${file}",
-        "${input:zkPreset}",
-        "${workspaceFolder}"
+        "-lc",
+        "./zk_apply_preset_from_pick.sh \"${file}\" \"${input:zkPreset}\""
       ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
       "problemMatcher": []
     },
 
     {
       "label": "zk: search tag preset",
-      "type": "shell",
+      "type": "process",
       "command": "bash",
+      "windows": {
+        "command": "C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe"
+      },
       "args": [
-        "${workspaceFolder}/zk_search_tag_from_pick.sh",
-        "${input:zkSearch}",
-        "${workspaceFolder}"
+        "-lc",
+        "./zk_search_tag_from_pick.sh \"${input:zkSearch}\""
       ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
       "problemMatcher": [],
       "presentation": {
         "reveal": "never",
         "panel": "shared"
       }
     },
+
     {
       "label": "zk: search tag + text",
-      "type": "shell",
+      "type": "process",
       "command": "bash",
+      "windows": {
+        "command": "C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe"
+      },
       "args": [
-        "${workspaceFolder}/zk_search_tag_text_from_pick.sh",
-        "${input:zkSearch}",
-        "${input:zkSearchText}",
-        "${workspaceFolder}"
+        "-lc",
+        "./zk_search_tag_text_from_pick.sh \"${input:zkSearch}\" \"${input:zkSearchText}\""
       ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
       "problemMatcher": [],
       "presentation": {
         "reveal": "never",
@@ -62,20 +81,18 @@
       }
     }
   ],
+
   "inputs": [
     {
       "id": "zkPreset",
       "type": "pickString",
       "description": "ZK preset を選択（説明つき）",
       "options": [
-        // =================================================================
-        // 追加タグの一覧
-        // =================================================================
         "issue | 今困っていること・解決すべき課題 | +issue",
         "analysis | 背景・因果・整理・検討メモ | +analysis",
         "decision | 意思決定の記録 | +decision",
         "pme_hub | PMEのハブノート化（fleeting除去） | +zk-permanent +ctx-pme +hub -zk-fleeting",
-        "mng-task | タスク管理について |  mng-task  zk-fleeting"
+        "mng-task | タスク管理について | +mng-task +zk-fleeting"
       ],
       "default": "issue | 今困っていること・解決すべき課題 | +issue"
     },
@@ -85,9 +102,6 @@
       "type": "pickString",
       "description": "タグ検索プリセットを選択",
       "options": [
-        // =================================================================
-        // 検索一覧
-        // =================================================================
         "all | ",
         "issue全般 | issue -zk-archive",
         "decision全般 | decision",
@@ -105,22 +119,23 @@
         "PME: AM2 解答済 | ctx-exam ctx-exam-pme past-pme pme-am2 -zk-fleeting zk-seed",
         "PME: knowledge | pme-knowledge",
 
-        "ZK: | zk-seed, mng-task, analysis"
+        "ZK: mng-task + analysis + seed | zk-seed mng-task analysis"
       ],
       "default": "issue全般 | issue -zk-archive"
     },
+
     {
       "id": "zkSearchText",
       "type": "promptString",
       "description": "本文に含まれるキーワード（空ならタグ検索のみ）",
       "default": ""
     },
+
     {
       "id": "zkAdHocTags",
       "type": "promptString",
       "description": "タグ検索クエリ（例: issue -zk-archive / ctx-exam ctx-exam-pme）",
       "default": ""
     }
-
   ]
 }
