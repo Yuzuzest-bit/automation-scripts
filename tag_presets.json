@@ -1,0 +1,38 @@
+{
+  "issue": {
+    "label": "issue",
+    "description": "今困っていること・解決すべき課題",
+    "ops": ["+issue"]
+  },
+  "analysis": {
+    "label": "analysis",
+    "description": "背景・因果・整理・検討メモ",
+    "ops": ["+analysis"]
+  },
+  "decision": {
+    "label": "decision",
+    "description": "意思決定の記録（理由/結論を残す）",
+    "ops": ["+decision"]
+  },
+
+  "pme_hub": {
+    "label": "PME hub",
+    "description": "PMEのハブノート化（fleeting除去）",
+    "ops": ["+zk-permanent", "+ctx-pme", "+hub", "-zk-fleeting"]
+  },
+  "pme_past_am1": {
+    "label": "PME 過去問 AM1",
+    "description": "AM1の過去問ノートへ寄せる",
+    "ops": ["+ctx-exam", "+ctx-exam-pme", "+past-pme", "+pme-am1", "+zk-seed", "-zk-fleeting"]
+  },
+  "pme_past_am2": {
+    "label": "PME 過去問 AM2",
+    "description": "AM2の過去問ノートへ寄せる",
+    "ops": ["+ctx-exam", "+ctx-exam-pme", "+past-pme", "+pme-am2", "+zk-seed", "-zk-fleeting"]
+  },
+  "pme_knowledge": {
+    "label": "PME knowledge",
+    "description": "PME知識ノートの本体側へ寄せる",
+    "ops": ["+ctx-exam", "+ctx-exam-pme", "+pme-knowledge", "+zk-permanent", "-zk-fleeting"]
+  }
+}
