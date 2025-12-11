@@ -21,17 +21,26 @@
         "panel": "shared"
       }
     },
-    {
-      "label": "ZK: search text in children",
-      "type": "shell",
-      "command": "/bin/zsh",
-      "args": [
-        "-lc",
-        "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"; ROOT=\"${workspaceFolder}\"; [ -z \"$ROOT\" ] && ROOT=\"$PWD\"; cd \"$ROOT\"; \"$ROOT/search_children_text.sh\" \"${file}\" \"${input:childSearchQuery}\" \"$ROOT\""
-      ],
-      "problemMatcher": []
-    },
-
+{
+  "label": "ZK: search text in children",
+  "type": "process",
+  "command": "bash",
+  "windows": {
+    "command": "C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe"
+  },
+  "args": [
+    "-lc",
+    "./search_children_text.sh \"${file}\" \"${input:childSearchQuery}\" \"${workspaceFolder}\""
+  ],
+  "options": {
+    "cwd": "${workspaceFolder}"
+  },
+  "problemMatcher": [],
+  "presentation": {
+    "reveal": "never",
+    "panel": "shared"
+  }
+},
     {
       "label": "add_tag",
       "type": "process",
