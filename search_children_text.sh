@@ -8,12 +8,15 @@
 # - 孫ノートは辿らない
 # - 検索は固定文字列 (grep -F)
 # - macOS / Linux / Windows(Git Bash) 想定
+#
+# DEBUG=1 を付けて実行すると解決ログを出す
 
 set -euo pipefail
 
 CUR="${1:-}"
 QUERY="${2:-}"
 ROOT="${3:-${PWD}}"
+DEBUG="${DEBUG:-0}"
 
 if [[ -z "$CUR" || -z "$QUERY" ]]; then
   echo "usage: $0 <current_file> <query> [ROOT_DIR]" >&2
@@ -39,8 +42,6 @@ if [[ ! -f "$CUR" ]]; then
   echo "current file not found: $CUR" >&2
   exit 1
 fi
-
-# ROOT 正規化
 if [[ ! -d "$ROOT" ]]; then
   echo "ROOT dir not found: $ROOT" >&2
   exit 1
@@ -51,12 +52,13 @@ OUT_MD="${DASH_DIR}/children_text_search.md"
 mkdir -p "$DASH_DIR"
 
 tmp_links="$(mktemp)"
-tmp_targets="$(mktemp)"
-trap 'rm -f "$tmp_links" "$tmp_targets"' EXIT
+trap 'rm -f "$tmp_links"' EXIT
 
-# 1) 現在ノートから wikilink を抽出
-#    - [[path/to/file|alias]] 形式を考慮し、| より左だけ使う
-#    - 末尾/先頭の空白は軽くトリム
+log() {
+  [[ "$DEBUG" == "1" ]] && echo "[DEBUG] $*" >&2
+}
+
+# 1) wikilink 抽出
 grep -oE '\[\[[^]]+\]\]' "$CUR" \
   | sed -E 's/^\[\[//; s/\]\]$//' \
   | sed -E 's/\|.*$//' \
@@ -64,40 +66,86 @@ grep -oE '\[\[[^]]+\]\]' "$CUR" \
   | awk 'NF' \
   | sort -u > "$tmp_links"
 
-# 2) link 名から実ファイルパス候補を作る
-#    - 拡張子が無ければ .md を付ける
-#    - フォルダ指定があってもそのまま扱う
-#    - ROOT 配下で解決する想定（Foam/ZK 的運用）
-while IFS= read -r t; do
-  # 何も無ければ skip
-  [[ -z "$t" ]] && continue
+# 2) link文字列から実ファイルを解決する
+#    - パスを含む場合は ROOT 相対の直指定を優先
+#    - 無い場合は find で名前一致探索
+resolve_link_to_file() {
+  local t="$1"
+  local candidate=""
 
-  # すでに拡張子があるか？
-  if [[ "$t" == *.* ]]; then
-    echo "$ROOT/$t"
-  else
-    echo "$ROOT/$t.md"
-  fi
-done < "$tmp_links" | sort -u > "$tmp_targets"
+  # すでに拡張子が入っているか判定
+  local has_ext=0
+  [[ "$t" == *.* ]] && has_ext=1
 
-# 3) 検索してヒットした子ノートだけ収集
-matches=()
-snippets=()
-
-while IFS= read -r f; do
-  [[ -z "$f" ]] && continue
-  if [[ -f "$f" ]]; then
-    # -n: 行番号
-    # -F: 固定文字列
-    # -m 1: 最初の1件だけ抜粋用
-    if grep -nF -- "$QUERY" "$f" >/dev/null 2>&1; then
-      matches+=("$f")
-      # 最初のヒット行を軽く抜粋（表示用）
-      first_line="$(grep -nF -m 1 -- "$QUERY" "$f" || true)"
-      snippets+=("$first_line")
+  # パス指定っぽい場合（/ を含む）
+  if [[ "$t" == */* ]]; then
+    if [[ "$has_ext" == "1" ]]; then
+      candidate="$ROOT/$t"
+      [[ -f "$candidate" ]] && { echo "$candidate"; return 0; }
+    else
+      candidate="$ROOT/$t.md"
+      [[ -f "$candidate" ]] && { echo "$candidate"; return 0; }
     fi
   fi
-done < "$tmp_targets"
+
+  # パス無し → ROOT 配下から名前探索
+  # 除外ディレクトリはあなたの運用でノイズになりやすいところを避ける
+  local name1="$t"
+  local name2="$t.md"
+
+  # find は環境差があるので -o で両方探す
+  # まず拡張子ありを優先探索する
+  if [[ "$has_ext" == "1" ]]; then
+    candidate="$(find "$ROOT" \
+      -type f \
+      -not -path "*/.git/*" \
+      -not -path "*/.foam/*" \
+      -not -path "*/dashboards/*" \
+      -not -path "*/tags/*" \
+      -name "$name1" \
+      2>/dev/null | sort | head -n 1 || true)"
+    [[ -n "$candidate" ]] && { echo "$candidate"; return 0; }
+  else
+    candidate="$(find "$ROOT" \
+      -type f \
+      -not -path "*/.git/*" \
+      -not -path "*/.foam/*" \
+      -not -path "*/dashboards/*" \
+      -not -path "*/tags/*" \
+      \( -name "$name2" -o -name "$name1" \) \
+      2>/dev/null | sort | head -n 1 || true)"
+    [[ -n "$candidate" ]] && { echo "$candidate"; return 0; }
+  fi
+
+  return 1
+}
+
+# 3) 検索
+matches=()
+snippets=()
+match_rels=()
+
+while IFS= read -r t; do
+  [[ -z "$t" ]] && continue
+
+  log "link token: $t"
+
+  f="$(resolve_link_to_file "$t" || true)"
+  if [[ -z "$f" || ! -f "$f" ]]; then
+    log "resolved: NOT FOUND"
+    continue
+  fi
+
+  rel="${f#"$ROOT"/}"
+  log "resolved: $rel"
+
+  if grep -nF -- "$QUERY" "$f" >/dev/null 2>&1; then
+    matches+=("$t")          # 表示は link 名ベース
+    match_rels+=("$rel")     # デバッグ/将来拡張用
+    first_line="$(grep -nF -m 1 -- "$QUERY" "$f" || true)"
+    snippets+=("$first_line")
+  fi
+done < "$tmp_links"
 
 # 4) ダッシュボード出力
 {
@@ -118,25 +166,23 @@ done < "$tmp_targets"
     echo "## Result"
     echo ""
     echo "No matches found in direct children."
+    echo ""
+    echo "### Notes"
+    echo "- If you want debug logs, run with: \`DEBUG=1\`"
   else
     echo "## Matches (${#matches[@]})"
     echo ""
     for i in "${!matches[@]}"; do
-      f="${matches[$i]}"
-      rel="${f#"$ROOT"/}"
+      t="${matches[$i]}"
 
-      # Markdown の見やすさ優先で wikilink 表示
+      # 元の wikilink 文字列をそのまま出す
       # （Foam の解決に任せる）
-      base="${rel%.md}"
-      echo "- [[${base}]]"
+      echo "- [[${t}]]"
 
-      # 抜粋がある場合はインデント表示
       if [[ -n "${snippets[$i]}" ]]; then
-        # "123:line" 形式を "L123: line" に見せる
         s="${snippets[$i]}"
         ln="${s%%:*}"
         tx="${s#*:}"
-        # 余白整形
         tx="$(echo "$tx" | sed -E 's/^[[:space:]]+//')"
         echo "  - L${ln}: ${tx}"
       fi
