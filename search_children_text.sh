@@ -5,11 +5,15 @@
 # その子ノート群の本文から <query> を検索して、
 # ヒットした子ノートのリンクをダッシュボードに出力する。
 #
-# - 孫ノートは辿らない
+# 特徴:
+# - 孫ノートは辿らない（“今のノートに書かれているリンク先だけ”）
 # - 検索は固定文字列 (grep -F)
+# - Foam でリンク先が別フォルダに散っていても find で解決
+# - dashboard / dashboards どちらのフォルダ名でも動作
+# - grep の終了コードで set -e が暴発しないよう安全化
 # - macOS / Linux / Windows(Git Bash) 想定
 #
-# DEBUG=1 を付けて実行すると解決ログを出す
+# DEBUG=1 を付けると解決ログを stderr に出します。
 
 set -euo pipefail
 
@@ -47,37 +51,52 @@ if [[ ! -d "$ROOT" ]]; then
   exit 1
 fi
 
-DASH_DIR="${ROOT}/dashboards"
-OUT_MD="${DASH_DIR}/children_text_search.md"
+log() { [[ "$DEBUG" == "1" ]] && echo "[DEBUG] $*" >&2; }
+
+# dashboard / dashboards 自動吸収
+if [[ -d "$ROOT/dashboard" ]]; then
+  DASH_DIR="$ROOT/dashboard"
+else
+  DASH_DIR="$ROOT/dashboards"
+fi
 mkdir -p "$DASH_DIR"
+OUT_MD="${DASH_DIR}/children_text_search.md"
 
 tmp_links="$(mktemp)"
 trap 'rm -f "$tmp_links"' EXIT
 
-log() {
-  [[ "$DEBUG" == "1" ]] && echo "[DEBUG] $*" >&2
+###############################################################################
+# 1) wikilink 抽出（grep ではなく awk で堅牢に）
+#    - [[path/name|alias]] -> "path/name"
+#    - 前後空白をトリム
+###############################################################################
+awk '
+{
+  line = $0
+  while (match(line, /\[\[[^]]+\]\]/)) {
+    s = substr(line, RSTART+2, RLENGTH-4)  # [[...]] の中身
+    sub(/\|.*/, "", s)                    # alias 部分除去
+    gsub(/^[ \t]+|[ \t]+$/, "", s)        # trim
+    if (length(s) > 0) print s
+    line = substr(line, RSTART + RLENGTH)
+  }
 }
+' "$CUR" | sort -u > "$tmp_links"
 
-# 1) wikilink 抽出
-grep -oE '\[\[[^]]+\]\]' "$CUR" \
-  | sed -E 's/^\[\[//; s/\]\]$//' \
-  | sed -E 's/\|.*$//' \
-  | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
-  | awk 'NF' \
-  | sort -u > "$tmp_links"
-
+###############################################################################
 # 2) link文字列から実ファイルを解決する
 #    - パスを含む場合は ROOT 相対の直指定を優先
-#    - 無い場合は find で名前一致探索
+#    - 無い場合は ROOT 配下を find して名前一致解決
+#    - dashboards / dashboard / tags / .foam / .git は探索除外
+###############################################################################
 resolve_link_to_file() {
   local t="$1"
   local candidate=""
-
-  # すでに拡張子が入っているか判定
   local has_ext=0
+
   [[ "$t" == *.* ]] && has_ext=1
 
-  # パス指定っぽい場合（/ を含む）
+  # パス指定がある場合は直指定優先
   if [[ "$t" == */* ]]; then
     if [[ "$has_ext" == "1" ]]; then
       candidate="$ROOT/$t"
@@ -88,19 +107,17 @@ resolve_link_to_file() {
     fi
   fi
 
-  # パス無し → ROOT 配下から名前探索
-  # 除外ディレクトリはあなたの運用でノイズになりやすいところを避ける
   local name1="$t"
   local name2="$t.md"
 
-  # find は環境差があるので -o で両方探す
-  # まず拡張子ありを優先探索する
+  # find
   if [[ "$has_ext" == "1" ]]; then
     candidate="$(find "$ROOT" \
       -type f \
       -not -path "*/.git/*" \
       -not -path "*/.foam/*" \
       -not -path "*/dashboards/*" \
+      -not -path "*/dashboard/*" \
       -not -path "*/tags/*" \
       -name "$name1" \
       2>/dev/null | sort | head -n 1 || true)"
@@ -111,6 +128,7 @@ resolve_link_to_file() {
       -not -path "*/.git/*" \
       -not -path "*/.foam/*" \
       -not -path "*/dashboards/*" \
+      -not -path "*/dashboard/*" \
       -not -path "*/tags/*" \
       \( -name "$name2" -o -name "$name1" \) \
       2>/dev/null | sort | head -n 1 || true)"
@@ -120,14 +138,14 @@ resolve_link_to_file() {
   return 1
 }
 
-# 3) 検索
+###############################################################################
+# 3) 子ノート本文を検索
+###############################################################################
 matches=()
 snippets=()
-match_rels=()
 
 while IFS= read -r t; do
   [[ -z "$t" ]] && continue
-
   log "link token: $t"
 
   f="$(resolve_link_to_file "$t" || true)"
@@ -139,15 +157,19 @@ while IFS= read -r t; do
   rel="${f#"$ROOT"/}"
   log "resolved: $rel"
 
+  # grep 0件は正常扱い
   if grep -nF -- "$QUERY" "$f" >/dev/null 2>&1; then
-    matches+=("$t")          # 表示は link 名ベース
-    match_rels+=("$rel")     # デバッグ/将来拡張用
-    first_line="$(grep -nF -m 1 -- "$QUERY" "$f" || true)"
+    matches+=("$t")
+
+    # 最初のヒット行だけ軽く抜粋
+    first_line="$(grep -nF -m 1 -- "$QUERY" "$f" 2>/dev/null || true)"
     snippets+=("$first_line")
   fi
 done < "$tmp_links"
 
+###############################################################################
 # 4) ダッシュボード出力
+###############################################################################
 {
   echo "---"
   echo "id: $(date +%Y%m%d)-children_text_search"
@@ -162,21 +184,19 @@ done < "$tmp_links"
   echo "- Generated: $(date '+%Y-%m-%d %H:%M')"
   echo ""
 
-  if [[ "${#matches[@]}" -eq 0 ]]; then
+  if [[ ! -s "$tmp_links" ]]; then
+    echo "## Result"
+    echo ""
+    echo "No wikilinks found in this note."
+  elif [[ "${#matches[@]}" -eq 0 ]]; then
     echo "## Result"
     echo ""
     echo "No matches found in direct children."
-    echo ""
-    echo "### Notes"
-    echo "- If you want debug logs, run with: \`DEBUG=1\`"
   else
     echo "## Matches (${#matches[@]})"
     echo ""
     for i in "${!matches[@]}"; do
       t="${matches[$i]}"
-
-      # 元の wikilink 文字列をそのまま出す
-      # （Foam の解決に任せる）
       echo "- [[${t}]]"
 
       if [[ -n "${snippets[$i]}" ]]; then
@@ -184,15 +204,19 @@ done < "$tmp_links"
         ln="${s%%:*}"
         tx="${s#*:}"
         tx="$(echo "$tx" | sed -E 's/^[[:space:]]+//')"
-        echo "  - L${ln}: ${tx}"
+        [[ -n "$ln" && -n "$tx" ]] && echo "  - L${ln}: ${tx}"
       fi
     done
   fi
 } > "$OUT_MD"
 
-# 5) VS Code で開く
+###############################################################################
+# 5) VS Code で開く（無ければパス表示）
+###############################################################################
 if command -v code >/dev/null 2>&1; then
   code -r "$OUT_MD"
 else
   echo "Wrote $OUT_MD"
 fi
+
+exit 0
