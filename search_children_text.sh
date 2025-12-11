@@ -7,9 +7,8 @@
 # - ヒットした子ノートのリンクをダッシュボードに出力
 #
 # 重要:
-# - Tasks 側の ${file} が想定とズレる問題を疑うため、
-#   何を読んだか/何を抽出したか/何を解決できたかを
-#   ダッシュボード内に詳細表示する（自己診断）
+# - Tasks 側の ${file} が想定とズレる問題を疑うための自己診断版をベースにしているが、
+#   出力は「Result セクションのみ」に簡略化する。
 #
 # - 孫ノートは辿らない
 # - 検索は固定文字列 (grep -F)
@@ -18,7 +17,7 @@
 #
 # macOS / Linux / Windows(Git Bash)
 
-set -u  # set -e は外す（Tasksで“終了コード1”地獄を避ける）
+set -u
 set -o pipefail
 
 CUR="${1:-}"
@@ -54,7 +53,7 @@ tmp_resolved="$(mktemp)"
 tmp_notfound="$(mktemp)"
 trap 'rm -f "$tmp_links" "$tmp_resolved" "$tmp_notfound"' EXIT
 
-# 0) 入力検証（落とさずレポートに出す）
+# 0) 入力検証（落とさず内部用に保持）
 cur_exists="no"
 root_exists="no"
 [[ -n "$CUR" && -f "$CUR" ]] && cur_exists="yes"
@@ -171,7 +170,7 @@ while IFS=$'\t' read -r t f; do
 done < "$tmp_resolved"
 
 ###############################################################################
-# 4) ダッシュボード出力（自己診断込み）
+# 4) ダッシュボード出力（Result セクションのみ）
 ###############################################################################
 link_count="$(wc -l < "$tmp_links" 2>/dev/null | tr -d ' ')"
 found_count="${#matches[@]}"
@@ -185,39 +184,6 @@ found_count="${#matches[@]}"
   echo "---"
   echo "# Children text search"
   echo ""
-  echo "## Self-diagnosis"
-  echo ""
-  echo "- CUR(arg1): \`$CUR\`"
-  echo "- CUR exists: **$cur_exists**"
-  echo "- ROOT(arg3): \`$ROOT\`"
-  echo "- ROOT exists: **$root_exists**"
-  echo "- Dashboard dir: \`$DASH_DIR\`"
-  echo "- Query(arg2): \`$QUERY\`"
-  echo ""
-  echo "- Extracted wikilinks: **$link_count**"
-  echo "- Resolved files: **$resolved_count**"
-  echo "- Not found by resolver: **$notfound_count**"
-  echo "- Matches: **$found_count**"
-  echo ""
-
-  echo "### Extracted link tokens (first 30)"
-  echo ""
-  if [[ -s "$tmp_links" ]]; then
-    nl -ba "$tmp_links" | head -n 30 | sed 's/^/  /'
-  else
-    echo "  (none)"
-  fi
-  echo ""
-
-  echo "### Not found tokens (first 30)"
-  echo ""
-  if [[ -s "$tmp_notfound" ]]; then
-    nl -ba "$tmp_notfound" | head -n 30 | sed 's/^/  /'
-  else
-    echo "  (none)"
-  fi
-  echo ""
-
   echo "## Result"
   echo ""
 
@@ -228,17 +194,21 @@ found_count="${#matches[@]}"
   elif [[ "$found_count" == "0" ]]; then
     echo "No matches found in direct children."
   else
-    echo "### Matches (${#matches[@]})"
-    echo ""
     for i in "${!matches[@]}"; do
       t="${matches[$i]}"
       echo "- [[${t}]]"
+
       s="${snippets[$i]:-}"
       if [[ -n "$s" ]]; then
         ln="${s%%:*}"
         tx="${s#*:}"
         tx="$(echo "$tx" | sed -E 's/^[[:space:]]+//')"
-        [[ -n "$ln" && -n "$tx" ]] && echo "  - L${ln}: ${tx}"
+
+        # 箇条書き配下の引用として表示（Markdown的に > を使う）
+        # インデント2スペース + > でリストにネスト
+        if [[ -n "$ln" && -n "$tx" ]]; then
+          echo "  > L${ln}: ${tx}"
+        fi
       fi
     done
   fi
