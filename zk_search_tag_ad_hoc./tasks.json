@@ -1,0 +1,27 @@
+    {
+      "label": "zk: search tag (ad hoc + text)",
+      "type": "shell",
+      "command": "/opt/homebrew/bin/bash",
+      "args": [
+        "${workspaceFolder}/zk_search_tag_ad_hoc.sh",
+        "${input:zkAdHocTags}",
+        "--text",
+        "${input:zkAdHocText}",
+        "--root",
+        "${workspaceFolder}"
+      ],
+      "problemMatcher": [],
+      "presentation": { "reveal": "never", "panel": "shared" }
+    },
+    {
+      "id": "zkAdHocTags",
+      "type": "promptString",
+      "description": "タグ検索クエリ（例: issue -zk-archive / ctx-exam ctx-exam-pme）",
+      "default": ""
+    },
+    {
+      "id": "zkAdHocText",
+      "type": "promptString",
+      "description": "本文テキスト（空ならタグ検索のみ）",
+      "default": ""
+    },
