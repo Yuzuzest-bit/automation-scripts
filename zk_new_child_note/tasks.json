@@ -1,0 +1,28 @@
+{
+  "label": "ZK: New child note (append link)",
+  "type": "shell",
+  "command": "bash",
+  "args": [
+    "${workspaceFolder}/zk_new_child_note.sh",
+    "${file}",
+    "${input:childTitle}",
+    "${workspaceFolder}",
+    "${input:childTemplate}"
+  ],
+  "problemMatcher": []
+},
+"inputs": [
+  {
+    "id": "childTitle",
+    "type": "promptString",
+    "description": "Child note title",
+    "default": "メモ"
+  },
+  {
+    "id": "childTemplate",
+    "type": "pickString",
+    "description": "Template",
+    "options": ["task", "review"],
+    "default": "task"
+  }
+]
