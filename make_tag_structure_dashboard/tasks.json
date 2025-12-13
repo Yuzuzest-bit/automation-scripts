@@ -1,0 +1,7 @@
+    {
+      "label": "due_tree (tree)",
+      "type": "shell",
+      "command": "bash",
+      "args": ["${workspaceFolder}/make_tag_structure_dashboard.sh", "${workspaceFolder}"],
+      "problemMatcher": []
+    },
