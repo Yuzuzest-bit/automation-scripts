@@ -3,8 +3,8 @@ set -euo pipefail
 
 PARENT_FILE="${1:-}"
 CHILD_TITLE="${2:-}"
-ROOT="${3:-}"
-TEMPLATE_KEY="${4:-task}"   # ←追加: task / review など
+ROOT="${3:-}"             # ← 互換維持: templates を探す「ボルトのROOT」として扱う
+TEMPLATE_KEY="${4:-task}" # task / review など
 
 if [[ -z "$PARENT_FILE" || -z "$CHILD_TITLE" ]]; then
   echo "usage: $0 <parent-md-file> <child-title> [ROOT_DIR] [TEMPLATE_KEY]" >&2
@@ -74,7 +74,6 @@ insert_link_below_frontmatter() {
   local child_base="$2"  # 拡張子なし
   local link="[[${child_base}]]"
 
-  # 既にどこかに同リンクがあるなら何もしない
   if grep -Fq "$link" "$parent"; then
     echo "[INFO] link already exists in parent, skip insert"
     return 0
@@ -83,15 +82,12 @@ insert_link_below_frontmatter() {
   local tmp
   tmp="$(mktemp)"
 
-  # frontmatter が先頭にある前提で、2つ目の --- の直後に挿入する
-  # 2つ目の --- が見つからなければ exit 3 してフォールバックする
   awk -v link="$link" '
     BEGIN { started=0; inFM=0; inserted=0 }
 
     {
       line=$0
 
-      # 先頭判定（空行は素通し）
       if (started==0) {
         if (line ~ /^[[:space:]]*$/) { print $0; next }
         if (line ~ /^[[:space:]]*---[[:space:]]*$/) {
@@ -100,13 +96,11 @@ insert_link_below_frontmatter() {
           print $0
           next
         }
-        # frontmatter が無いファイル（要件外）
         started=2
         print $0
         next
       }
 
-      # frontmatter中
       if (started==1 && inFM==1) {
         print $0
         if (line ~ /^[[:space:]]*---[[:space:]]*$/) {
@@ -121,12 +115,10 @@ insert_link_below_frontmatter() {
         next
       }
 
-      # 本文
       print $0
     }
 
     END {
-      # frontmatter開始したのに終端 --- が無かった
       if (started==1 && inserted==0) exit 3
     }
   ' "$parent" > "$tmp" || {
@@ -139,9 +131,7 @@ insert_link_below_frontmatter() {
   echo "[INFO] inserted below frontmatter: $link"
 }
 
-
 esc_sed_repl() {
-  # sed 置換の右辺用エスケープ（delimiterを | にしてるので |, &, \ を逃がす）
   printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'
 }
 
@@ -167,13 +157,20 @@ render_template() {
     "$tmpl_file" > "$out_file"
 }
 
+# ---- main ----
+
 PARENT_FILE="$(to_posix "$PARENT_FILE")"
 [[ -f "$PARENT_FILE" ]] || { echo "[ERR] not found: $PARENT_FILE" >&2; exit 2; }
 
-if [[ -z "$ROOT" ]]; then
-  ROOT="$(cd "$(dirname "$PARENT_FILE")" && pwd)"
+# 親ノートのディレクトリ（子ノートは必ずここに作る）
+PARENT_DIR="$(cd "$(dirname "$PARENT_FILE")" && pwd)"
+
+# ROOT は「テンプレを探すボルトROOT」として使用（互換維持）
+# 未指定なら従来通り: 親と同じ場所をROOT扱いにする
+if [[ -z "${ROOT}" ]]; then
+  VAULT_ROOT="$PARENT_DIR"
 else
-  ROOT="$(to_posix "$ROOT")"
+  VAULT_ROOT="$(to_posix "$ROOT")"
 fi
 
 PARENT_ID="$(get_fm_id "$PARENT_FILE")"
@@ -187,7 +184,9 @@ NOW="$(date '+%Y-%m-%d %H:%M')"
 
 BASE="$(slugify "$CHILD_TITLE")"
 CHILD_BASE="${TODAY_YMD}_${BASE}"
-CHILD_PATH="${ROOT}/${CHILD_BASE}.md"
+
+# ★ここが変更点：子は「親と同じフォルダ」
+CHILD_PATH="${PARENT_DIR}/${CHILD_BASE}.md"
 CHILD_ID="$(date '+%Y%m%d')-${CHILD_BASE}"
 
 if [[ -e "$CHILD_PATH" ]]; then
@@ -195,30 +194,32 @@ if [[ -e "$CHILD_PATH" ]]; then
   exit 1
 fi
 
-# テンプレ選択（ROOT/templates/child_<key>.md）
-TEMPL_DIR="${ROOT}/templates"
+# テンプレ選択（VAULT_ROOT/templates/child_<key>.md）
+TEMPL_DIR="${VAULT_ROOT}/templates"
 TEMPL_FILE="${TEMPL_DIR}/child_${TEMPLATE_KEY}.md"
 
 if [[ ! -f "$TEMPL_FILE" ]]; then
   echo "[ERR] template not found: $TEMPL_FILE" >&2
   echo "[HINT] create templates/child_${TEMPLATE_KEY}.md (e.g. child_task.md, child_review.md)" >&2
+  echo "[HINT] current VAULT_ROOT: $VAULT_ROOT" >&2
   exit 1
 fi
 
 render_template "$TEMPL_FILE" "$CHILD_PATH"
 
-echo "[INFO] created: $CHILD_PATH"
+echo "[INFO] created   : $CHILD_PATH"
 echo "[INFO] parent id : $PARENT_ID"
 echo "[INFO] template  : ${TEMPLATE_KEY}"
+echo "[INFO] parent dir: $PARENT_DIR"
+echo "[INFO] vault root: $VAULT_ROOT"
 
 insert_link_below_frontmatter "$PARENT_FILE" "$CHILD_BASE" || {
   echo "[WARN] could not insert below frontmatter; fallback to append end" >&2
   printf '\n[[%s]]\n' "$CHILD_BASE" >> "$PARENT_FILE"
 }
-# おまけ：親IDをクリップボードへ
+
 clip_set "$PARENT_ID" || true
 
-# VS Codeで子を開く
 if command -v code >/dev/null 2>&1; then
   code -r "$CHILD_PATH" >/dev/null 2>&1 || true
 fi
