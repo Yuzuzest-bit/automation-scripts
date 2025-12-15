@@ -1,0 +1,16 @@
+"highlight.regexes": {
+  "(^.*🎯.*$)": {
+    "filterLanguageRegex": "markdown",
+    "filterFileRegex": ".*default_dashboard\\.md$",
+    "regexFlags": "gm",
+    "decorations": [
+      {
+        "isWholeLine": true,
+        "backgroundColor": "#2A2E39",
+        "borderColor": "#F0B429",
+        "borderStyle": "solid",
+        "borderWidth": "0 0 0 4px"
+      }
+    ]
+  }
+}
