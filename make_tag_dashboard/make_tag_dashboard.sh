@@ -60,9 +60,9 @@
 # 追加仕様3（2ヶ月先まで週単位バケツ）:
 #   - 期限付きタスクは、今日から 60 日先までは 1週間ごとにグルーピングする。
 #
-# 追加仕様4（Focus: 出力は🎯のみ）:
-#   - dashboards/.focuslist に並んでいるノート（basename一致）に 🎯 を付ける。
-#   - @focus 文字列はこのスクリプトは出力しない（Highlightは🎯で拾う想定）。
+# 追加仕様4（Focus印）:
+#   - 各ノート本文中に focus マーカーがある場合、そのノート行に 🎯 を付ける。
+#   - ダッシュボードには文字列は出さず、🎯だけ出す（Highlightは🎯をキーにする）。
 #
 # 出力:
 #   - いつでも dashboards/default_dashboard.md に上書き
@@ -127,7 +127,7 @@ if [[ "${1-}" == --* ]]; then
   done
 
 else
-  # ---------- 旧形式（互換ロジック） ----------
+  # ---------- 旧形式（あなたの元ロジック） ----------
   if [ "$#" -eq 0 ]; then
     ROOT="$PWD"
   elif [ "$#" -eq 1 ]; then
@@ -166,9 +166,6 @@ fi
 OUTDIR="${ROOT}/dashboards"
 mkdir -p "${OUTDIR}"
 OUT="${OUTDIR}/default_dashboard.md"
-
-# Focus list（別スクリプトが作る想定）
-FOCUS_FILE="${OUTDIR}/.focuslist"
 
 # --- 追加：除外指定の取り込み（ダッシュボード側ファイル / 環境変数） ---
 # 1) dashboards/.dashboardignore （1行=1項目, #コメント可）
@@ -247,51 +244,18 @@ FIND_CMD+=(-o "(" -type f -name '*.md' -print ")")
 "${FIND_CMD[@]}" > "${filelist}"
 
 # ------------------------------
-# 第1段階: frontmatter を読んで情報抽出
+# 第1段階: frontmatter を読んで情報抽出（本文も読み、focusマーカーを検出）
 # ------------------------------
-awk -v tag="${TAG}" -v out_due="${tmp_due}" -v out_nodue="${tmp_nodue}" -v focusfile="${FOCUS_FILE}" '
+awk -v tag="${TAG}" -v out_due="${tmp_due}" -v out_nodue="${tmp_nodue}" '
 function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
 function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
 function trim(s){ return rtrim(ltrim(s)) }
-
-function norm_name(s,   t) {
-  t = s
-  gsub(/\r$/, "", t)
-  # コメント除去
-  sub(/[[:space:]]*#.*/, "", t)
-  t = trim(t)
-  if (t == "") return ""
-
-  # [[...]] を剥がす
-  gsub(/^\[\[/, "", t)
-  gsub(/\]\]$/, "", t)
-
-  # パスが来ても basename 化
-  sub(/^.*\//, "", t)
-
-  # .md を剥がす
-  if (length(t) > 3 && substr(t, length(t)-2) == ".md") {
-    t = substr(t, 1, length(t)-3)
-  }
-
-  t = tolower(trim(t))
-  return t
-}
 
 # tag 文字列を空白区切りで分解して wantedTags[] に格納
 BEGIN {
   nTag = 0
   if (tag != "") {
     nTag = split(tag, wantedTags, /[[:space:]]+/)
-  }
-
-  # focus list 読み込み（存在すれば）
-  if (focusfile != "") {
-    while ((getline fl < focusfile) > 0) {
-      key = norm_name(fl)
-      if (key != "") focusSet[key] = 1
-    }
-    close(focusfile)
   }
 }
 
@@ -326,15 +290,15 @@ NR==FNR {
   }
   basename = b
 
-  # focus 判定（basename が focusSet にあれば）
-  key = norm_name(basename)
-  if (key != "" && (key in focusSet)) {
-    isFocus = 1
-  }
-
   # ===== ファイルを1行ずつ読む =====
   while ((getline line < file) > 0) {
     sub(/\r$/, "", line)
+
+    # focus マーカー検出（本文/フロントマター問わず）
+    lowline = tolower(line)
+    if (index(lowline, "@focus") > 0) {
+      isFocus = 1
+    }
 
     # frontmatter 開始前の「最初の非空行」が --- 以外なら nonHead=1
     tmpLine = line
@@ -355,13 +319,21 @@ NR==FNR {
         fmDone = 1
         continue
       } else {
-        # frontmatter 終了後の --- は無視
+        # frontmatter 終了後の --- は無視（本文の区切り）
       }
     }
 
     # ---- frontmatter 内だけを見る ----
     if (inFM == 1) {
-      low = tolower(line)
+      low = line
+      # 小文字化（既存ロジック維持）
+      for (i = 1; i <= length(low); i++) {
+        c = substr(low, i, 1)
+        if (c >= "A" && c <= "Z") {
+          low = substr(low, 1, i-1) "" tolower(c) "" substr(low, i+1)
+        }
+      }
+
       copy = low
       gsub(/[ \t]/, "", copy)
 
@@ -433,6 +405,8 @@ NR==FNR {
           tmp = trim(substr(low, p + length("due_source:")))
           if (tmp ~ /^other/) {
             srcVal = "other"
+          } else if (tmp ~ /^self/) {
+            srcVal = "self"
           } else {
             srcVal = "self"
           }
@@ -446,6 +420,8 @@ NR==FNR {
           tmp = trim(substr(low, p + length("due_weight:")))
           if (tmp ~ /^hard/) {
             wgtVal = "hard"
+          } else if (tmp ~ /^soft/) {
+            wgtVal = "soft"
           } else {
             wgtVal = "soft"
           }
@@ -492,7 +468,7 @@ else
 fi
 
 {
-  echo "# ${HEADER_LABEL} – 未クローズタスク (2ヶ月先まで週単位 + BrainDump優先 + gateアイコン + due_source/due_weight + 🎯focus)"
+  echo "# ${HEADER_LABEL} – 未クローズタスク (2ヶ月先まで週単位 + BrainDump優先 + gateアイコン + due_source/due_weight + 🎯)"
   echo
   echo "- 生成時刻: $(date '+%Y-%m-%d %H:%M')"
   echo "- 条件: ${CONDITION_TEXT}"
@@ -500,7 +476,7 @@ fi
   echo "- BrainDump タグ付きノートは 🔥 セクションに表示"
   echo "- gate-* タグ付きノートは 🚧🔴 のようにアイコンで目立つ"
   echo "- due_source / due_weight: other → 🤝, hard → ⚠️（self+soft は表示なし）"
-  echo "- 🎯: dashboards/.focuslist に載っているノート（basename一致）"
+  echo "- 🎯: focus印（文字列は出しません）"
   echo
 
   if [ ! -s "${tmp_due}" ] && [ ! -s "${tmp_nodue}" ]; then
@@ -544,9 +520,8 @@ fi
         }
         return s
       }
-      function focus_icon(f) {
-        return (f > 0 ? "🎯" : "")
-      }
+      function focus_icon(f) { return (f > 0 ? "🎯" : "") }
+
       BEGIN {
         todayJ = ymd_to_jdn(today)
         oN = todayN = tomN = 0
@@ -581,181 +556,131 @@ fi
         dJ = ymd_to_jdn(substr(due,1,10))
         diff = dJ - todayJ
 
-        if (dJ == 0) {
-          bucket = "later"
-        } else if (diff < 0) {
-          bucket = "over"
-        } else if (diff == 0) {
-          bucket = "today"
-        } else if (diff == 1) {
-          bucket = "tomorrow"
-        } else if (diff <= 6) {
-          bucket = "w0"
-        } else if (diff <= 13) {
-          bucket = "w1"
-        } else if (diff <= 20) {
-          bucket = "w2"
-        } else if (diff <= 27) {
-          bucket = "w3"
-        } else if (diff <= 34) {
-          bucket = "w4"
-        } else if (diff <= 41) {
-          bucket = "w5"
-        } else if (diff <= 48) {
-          bucket = "w6"
-        } else if (diff <= 55) {
-          bucket = "w7"
-        } else if (diff <= 60) {
-          bucket = "w8"
-        } else {
-          bucket = "later"
-        }
+        if (dJ == 0)        bucket = "later"
+        else if (diff < 0)  bucket = "over"
+        else if (diff == 0) bucket = "today"
+        else if (diff == 1) bucket = "tomorrow"
+        else if (diff <= 6) bucket = "w0"
+        else if (diff <= 13) bucket = "w1"
+        else if (diff <= 20) bucket = "w2"
+        else if (diff <= 27) bucket = "w3"
+        else if (diff <= 34) bucket = "w4"
+        else if (diff <= 41) bucket = "w5"
+        else if (diff <= 48) bucket = "w6"
+        else if (diff <= 55) bucket = "w7"
+        else if (diff <= 60) bucket = "w8"
+        else                  bucket = "later"
 
         if (bucket=="over") {
           oN++
-          o_due[oN]   = due
-          o_base[oN]  = base
-          o_pri[oN]   = pri
-          o_gate[oN]  = gate
-          o_foc[oN]   = foc
-          o_src[oN]   = src
-          o_wgt[oN]   = wgt
+          o_due[oN]=due; o_base[oN]=base; o_pri[oN]=pri; o_gate[oN]=gate; o_foc[oN]=foc; o_src[oN]=src; o_wgt[oN]=wgt
         } else if (bucket=="today") {
           todayN++
-          td_due[todayN]   = due
-          td_base[todayN]  = base
-          td_pri[todayN]   = pri
-          td_gate[todayN]  = gate
-          td_foc[todayN]   = foc
-          td_src[todayN]   = src
-          td_wgt[todayN]   = wgt
+          td_due[todayN]=due; td_base[todayN]=base; td_pri[todayN]=pri; td_gate[todayN]=gate; td_foc[todayN]=foc; td_src[todayN]=src; td_wgt[todayN]=wgt
         } else if (bucket=="tomorrow") {
           tomN++
-          tm_due[tomN]   = due
-          tm_base[tomN]  = base
-          tm_pri[tomN]   = pri
-          tm_gate[tomN]  = gate
-          tm_foc[tomN]   = foc
-          tm_src[tomN]   = src
-          tm_wgt[tomN]   = wgt
+          tm_due[tomN]=due; tm_base[tomN]=base; tm_pri[tomN]=pri; tm_gate[tomN]=gate; tm_foc[tomN]=foc; tm_src[tomN]=src; tm_wgt[tomN]=wgt
         } else if (bucket~ /^w[0-8]$/) {
           idx = substr(bucket, 2) + 0
           wN[idx]++
-          w_due[idx, wN[idx]]   = due
-          w_base[idx, wN[idx]]  = base
-          w_pri[idx, wN[idx]]   = pri
-          w_gate[idx, wN[idx]]  = gate
-          w_foc[idx, wN[idx]]   = foc
-          w_src[idx, wN[idx]]   = src
-          w_wgt[idx, wN[idx]]   = wgt
+          w_due[idx,wN[idx]]=due; w_base[idx,wN[idx]]=base; w_pri[idx,wN[idx]]=pri; w_gate[idx,wN[idx]]=gate; w_foc[idx,wN[idx]]=foc; w_src[idx,wN[idx]]=src; w_wgt[idx,wN[idx]]=wgt
         } else {
           laterN++
-          l_due[laterN]   = due
-          l_base[laterN]  = base
-          l_pri[laterN]   = pri
-          l_gate[laterN]  = gate
-          l_foc[laterN]   = foc
-          l_src[laterN]   = src
-          l_wgt[laterN]   = wgt
+          l_due[laterN]=due; l_base[laterN]=base; l_pri[laterN]=pri; l_gate[laterN]=gate; l_foc[laterN]=foc; l_src[laterN]=src; l_wgt[laterN]=wgt
         }
       }
       END {
-        # BrainDump
         if (bdN > 0) {
           print "## 🔥 BrainDump（要整理）"
           print ""
-          for (i = 1; i <= bdN; i++) {
+          for (i=1;i<=bdN;i++) {
             fi = focus_icon(bd_foc[i])
             mi = meta_icon(bd_src[i], bd_wgt[i])
-            extra = ""
-            if (fi != "") extra = extra " " fi
-            if (mi != "") extra = extra " " mi
+            extra=""
+            if (fi!="") extra=extra " " fi
+            if (mi!="") extra=extra " " mi
             print "- " bd_due[i] " " combo_icon(bd_pri[i], bd_gate[i]) extra " [[" bd_base[i] "]]"
           }
           print ""
         }
 
-        # 期限切れ
         if (oN > 0) {
           print "## ⏰ 期限切れ"
           print ""
-          for (i = 1; i <= oN; i++) {
+          for (i=1;i<=oN;i++) {
             fi = focus_icon(o_foc[i])
             mi = meta_icon(o_src[i], o_wgt[i])
-            extra = ""
-            if (fi != "") extra = extra " " fi
-            if (mi != "") extra = extra " " mi
+            extra=""
+            if (fi!="") extra=extra " " fi
+            if (mi!="") extra=extra " " mi
             print "- " o_due[i] " " combo_icon(o_pri[i], o_gate[i]) extra " [[" o_base[i] "]]"
           }
           print ""
         }
 
-        # 今日
         if (todayN > 0) {
           print "## 📌 今日"
           print ""
-          for (i = 1; i <= todayN; i++) {
+          for (i=1;i<=todayN;i++) {
             fi = focus_icon(td_foc[i])
             mi = meta_icon(td_src[i], td_wgt[i])
-            extra = ""
-            if (fi != "") extra = extra " " fi
-            if (mi != "") extra = extra " " mi
+            extra=""
+            if (fi!="") extra=extra " " fi
+            if (mi!="") extra=extra " " mi
             print "- " td_due[i] " " combo_icon(td_pri[i], td_gate[i]) extra " [[" td_base[i] "]]"
           }
           print ""
         }
 
-        # 明日
         if (tomN > 0) {
           print "## 📅 明日"
           print ""
-          for (i = 1; i <= tomN; i++) {
+          for (i=1;i<=tomN;i++) {
             fi = focus_icon(tm_foc[i])
             mi = meta_icon(tm_src[i], tm_wgt[i])
-            extra = ""
-            if (fi != "") extra = extra " " fi
-            if (mi != "") extra = extra " " mi
+            extra=""
+            if (fi!="") extra=extra " " fi
+            if (mi!="") extra=extra " " mi
             print "- " tm_due[i] " " combo_icon(tm_pri[i], tm_gate[i]) extra " [[" tm_base[i] "]]"
           }
           print ""
         }
 
-        labels[0] = "📅 今週（今日・明日以外）"
-        labels[1] = "📆 来週"
-        labels[2] = "📆 2週後"
-        labels[3] = "📆 3週後"
-        labels[4] = "📆 4週後"
-        labels[5] = "📆 5週後"
-        labels[6] = "📆 6週後"
-        labels[7] = "📆 7週後"
-        labels[8] = "📆 8週後"
+        labels[0]="📅 今週（今日・明日以外）"
+        labels[1]="📆 来週"
+        labels[2]="📆 2週後"
+        labels[3]="📆 3週後"
+        labels[4]="📆 4週後"
+        labels[5]="📆 5週後"
+        labels[6]="📆 6週後"
+        labels[7]="📆 7週後"
+        labels[8]="📆 8週後"
 
-        for (idx = 0; idx <= 8; idx++) {
+        for (idx=0; idx<=8; idx++) {
           if (wN[idx] > 0) {
             print "## " labels[idx]
             print ""
-            for (j = 1; j <= wN[idx]; j++) {
-              fi = focus_icon(w_foc[idx, j])
-              mi = meta_icon(w_src[idx, j], w_wgt[idx, j])
-              extra = ""
-              if (fi != "") extra = extra " " fi
-              if (mi != "") extra = extra " " mi
-              print "- " w_due[idx, j] " " combo_icon(w_pri[idx, j], w_gate[idx, j]) extra " [[" w_base[idx, j] "]]"
+            for (j=1; j<=wN[idx]; j++) {
+              fi = focus_icon(w_foc[idx,j])
+              mi = meta_icon(w_src[idx,j], w_wgt[idx,j])
+              extra=""
+              if (fi!="") extra=extra " " fi
+              if (mi!="") extra=extra " " mi
+              print "- " w_due[idx,j] " " combo_icon(w_pri[idx,j], w_gate[idx,j]) extra " [[" w_base[idx,j] "]]"
             }
             print ""
           }
         }
 
-        # 2ヶ月より先
         if (laterN > 0) {
           print "## 📌 2ヶ月より先"
           print ""
-          for (i = 1; i <= laterN; i++) {
+          for (i=1;i<=laterN;i++) {
             fi = focus_icon(l_foc[i])
             mi = meta_icon(l_src[i], l_wgt[i])
-            extra = ""
-            if (fi != "") extra = extra " " fi
-            if (mi != "") extra = extra " " mi
+            extra=""
+            if (fi!="") extra=extra " " fi
+            if (mi!="") extra=extra " " mi
             print "- " l_due[i] " " combo_icon(l_pri[i], l_gate[i]) extra " [[" l_base[i] "]]"
           }
           print ""
@@ -774,44 +699,33 @@ fi
           else if (p >= 3) return "🟢"
           else             return "⚪"
         }
-        function focus_icon(f) {
-          return (f > 0 ? "🎯" : "")
-        }
+        function focus_icon(f) { return (f > 0 ? "🎯" : "") }
         function meta_icon(src, wgt,    s) {
           s = ""
-          if (src == "other") {
-            s = s "🤝"
-          } else if (src != "" && src != "self") {
-            s = s "📎"
-          }
-          if (wgt == "hard") {
-            s = s "⚠️"
-          } else if (wgt != "" && wgt != "soft") {
-            s = s "❓"
-          }
+          if (src == "other") s = s "🤝"
+          else if (src != "" && src != "self") s = s "📎"
+          if (wgt == "hard") s = s "⚠️"
+          else if (wgt != "" && wgt != "soft") s = s "❓"
           return s
         }
         {
           pri  = $1 + 0
-          bd   = $2 + 0   # いまのところ未使用
+          bd   = $2 + 0
           gate = $3 + 0
           foc  = $4 + 0
           src  = $5
           wgt  = $6
           base = $7
-
           if (base == "") next
 
           icon = pri_icon(pri)
-          if (gate > 0) {
-            icon = "🚧" icon
-          }
+          if (gate > 0) icon = "🚧" icon
 
           fi = focus_icon(foc)
           mi = meta_icon(src, wgt)
-          extra = ""
-          if (fi != "") extra = extra " " fi
-          if (mi != "") extra = extra " " mi
+          extra=""
+          if (fi!="") extra=extra " " fi
+          if (mi!="") extra=extra " " mi
 
           print "- " icon extra " [[" base "]]"
         }
