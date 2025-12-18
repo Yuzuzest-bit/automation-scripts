@@ -64,7 +64,8 @@ slugify() {
   local s="$1"
   s="${s// /_}"
   s="$(printf '%s' "$s" | tr -d '\r')"
-  s="$(printf '%s' "$s" | sed -E 's/[^0-9A-Za-zぁ-んァ-ン一-龠_・-]+/_/g; s/_+/_/g; s/^_+|_+$//g')"
+  s="$(printf '%s' "$s" | sed -E 's/[^0-9A-Za-zぁ-んァ-ンー一-龠_・-]+/_/g; s/_+/_/g; s/^_+|_+$//g')"
+
   [[ -n "$s" ]] || s="child"
   printf '%s\n' "$s"
 }
