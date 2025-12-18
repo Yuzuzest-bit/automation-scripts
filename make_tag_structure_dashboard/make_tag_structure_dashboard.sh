@@ -167,8 +167,9 @@ fi
 # ------------------------------------------------------------
 # Stage1: frontmatter抽出 → tmp_nodes
 # 出力TSV:
-# id, parent, closed(0/1), due, pri, bd, gate, src, wgt, basename, tagOK, relpath
+# id, parent, closed(0/1), due, pri, bd, gate, src, wgt, focus, awaiting, awaitingWho, basename, tagOK, relpath
 #   - frontmatter無しでも出力する（closed=0扱い）
+#   - @focus / @awaiting は本文も含めて全文検索（awkのmatch第3引数は使わない＝BSD awk互換）
 # ------------------------------------------------------------
 awk -v tag="${TAG}" -v root="${ROOT}" '
 function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
@@ -224,6 +225,10 @@ NR==FNR {
   srcVal="self"
   wgtVal="soft"
 
+  isFocus=0
+  isAwait=0
+  awaitWho=""
+
   tagOK = (tag=="" ? 1 : 0)
 
   rp = relpath(file)
@@ -241,6 +246,28 @@ NR==FNR {
     sub(/\r$/, "", line)
     line = strip_bom(line)
 
+    # --- 本文検索: @focus / @awaiting（FMの外でも中でもOK）
+    lowline = tolower(line)
+
+    if (!isFocus) {
+      if (match(lowline, /@focus([^[:alnum:]_]|$)/)) isFocus=1
+    }
+    if (!isAwait) {
+      if (match(lowline, /@awaiting[[:space:]]+/)) {
+        isAwait=1
+        who = substr(line, RSTART+RLENGTH)
+        who = trim(who)
+        gsub(/\t+/, " ", who)
+        gsub(/[[:space:]]+$/, "", who)
+        # 末尾のコメントっぽいものは軽く削る（必要ならここを外してもOK）
+        sub(/[[:space:]]*<!--.*$/, "", who)
+        sub(/[[:space:]]*#.*$/, "", who)
+        who = trim(who)
+        if (length(who) > 60) who = substr(who, 1, 60) "..."
+        awaitWho = who
+      }
+    }
+
     tmp=line; gsub(/[ \t]/, "", tmp)
 
     if (!firstNonEmptySeen) {
@@ -251,22 +278,24 @@ NR==FNR {
         inFM=1
         continue
       } else {
-        # frontmatter無し → 以降見ない
-        break
+        # frontmatter無し → FM解析はしないが、本文検索は続ける
+        hasFM=0
+        inFM=0
+        # ここから先も読む（@focus/@awaiting検出のため）
       }
     }
 
-    if (!hasFM) break
-
-    # 終端: --- または ... を許可（壊れたFMで本文まで読まない）
-    if (inFM==1 && line ~ /^[[:space:]]*(---|\.\.\.)[[:space:]]*$/) {
-      fmDone=1
-      break
-    }
-
-    if (inFM==1) {
+    if (hasFM && inFM==1) {
       low = tolower(line)
       copy = low; gsub(/[ \t]/, "", copy)
+
+      # 終端: --- または ... を許可（壊れたFMで本文まで読まない）
+      if (line ~ /^[[:space:]]*(---|\.\.\.)[[:space:]]*$/) {
+        fmDone=1
+        inFM=0
+        inTags=0
+        continue
+      }
 
       # tags:（1行 / リスト両対応）
       if (low ~ /^[[:space:]]*tags:[[:space:]]*/) {
@@ -372,9 +401,21 @@ NR==FNR {
     if (allOK) tagOK=1
   }
 
-  printf("%s\t%s\t%d\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%d\t%s\n",
+  # @focus があれば @awaiting 表示は抑制（優先）
+  if (isFocus==1) {
+    isAwait=0
+    awaitWho=""
+  }
+
+  # awaitingWho のTSV安全化
+  gsub(/\t+/, " ", awaitWho)
+  gsub(/\r+/, " ", awaitWho)
+  gsub(/\n+/, " ", awaitWho)
+  awaitWho = trim(awaitWho)
+
+  printf("%s\t%s\t%d\t%s\t%d\t%d\t%d\t%s\t%s\t%d\t%d\t%s\t%s\t%d\t%s\n",
          idVal, parentVal, isClosed, (hasDue?dueVal:""), priVal, isBrainDump, isGate,
-         srcVal, wgtVal, basename, tagOK, rp)
+         srcVal, wgtVal, isFocus, isAwait, awaitWho, basename, tagOK, rp)
 }' "${filelist}" > "${tmp_nodes}"
 
 if [ "${DEBUG}" = "1" ]; then
@@ -384,7 +425,7 @@ fi
 # ------------------------------------------------------------
 # Stage2: show集合（未クローズ + 祖先） → tmp_show
 # tmp_show TSV:
-# id, parent, key, openDesc, closed, due, pri, bd, gate, src, wgt, base, active, relpath
+# id, parent, key, openDesc, closed, due, pri, bd, gate, src, wgt, focus, awaiting, awaitingWho, base, active, relpath
 # ------------------------------------------------------------
 awk -F'\t' '
 function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
@@ -417,9 +458,12 @@ BEGIN{ ROOT="ROOT" }
   gate=$7+0
   src=$8
   wgt=$9
-  base=$10
-  tagOK=$11+0
-  rel=$12
+  focus=$10+0
+  awaiting=$11+0
+  awho=$12
+  base=$13
+  tagOK=$14+0
+  rel=$15
 
   if (id=="") id="path:" rel
 
@@ -437,6 +481,9 @@ BEGIN{ ROOT="ROOT" }
   gateById[id]=gate
   srcById[id]=src
   wgtById[id]=wgt
+  focusById[id]=focus
+  awaitingById[id]=awaiting
+  awaitWhoById[id]=awho
   tagOKById[id]=tagOK
 }
 
@@ -497,7 +544,8 @@ END{
 
     print id "\t" p "\t" k "\t" od "\t" closedById[id] "\t" dueById[id] \
           "\t" priById[id] "\t" bdById[id] "\t" gateById[id] "\t" srcById[id] \
-          "\t" wgtById[id] "\t" baseById[id] "\t" af "\t" relById[id]
+          "\t" wgtById[id] "\t" focusById[id] "\t" awaitingById[id] "\t" awaitWhoById[id] \
+          "\t" baseById[id] "\t" af "\t" relById[id]
   }
 }' "${tmp_nodes}" > "${tmp_show}"
 
@@ -523,7 +571,7 @@ sort -k1,1 -k2,2 -k3,3n -k4,4 "${tmp_edges}" > "${tmp_edges_sorted}"
     echo "- 条件: tags に「${TAG}」すべてを含む未クローズ（+祖先ノートを表示）"
   fi
   echo "- 並び: 親ブロックは「配下の最短 due」で概ね前へ、子はその中で同様に並ぶ（完全な全体ソートはしない）"
-  echo "- 記号: 🔴🟠🟢 priority / 🚧 gate / 🔥 BrainDump / 🤝 other / ⚠️ hard / ✅ closed / ⚠️✅＝閉じてるのに未完了の子がいる疑い"
+  echo "- 記号: 🔴🟠🟢 priority / 🚧 gate / 🔥 BrainDump / 🤝 other / ⚠️ hard / ✅ closed / ⚠️✅＝閉じてるのに未完了の子がいる疑い / 🎯 @focus / ⏳ @awaiting"
   echo "## 🧭 ROOT"
 
   awk -F'\t' '
@@ -555,6 +603,11 @@ sort -k1,1 -k2,2 -k3,3n -k4,4 "${tmp_edges}" > "${tmp_edges_sorted}"
     if (baseCount[b] > 1 && r!="") return "[[" r "|" b "]]"
     return "[[" b "]]"
   }
+  function esc_inline(s){
+    # 箇条書きの中で変に崩れない程度にタブだけ潰す（必要最低限）
+    gsub(/\t+/, " ", s)
+    return s
+  }
 
   NR==FNR{
     id=$1; parent=$2
@@ -566,9 +619,12 @@ sort -k1,1 -k2,2 -k3,3n -k4,4 "${tmp_edges}" > "${tmp_edges_sorted}"
     gate=$9+0
     src=$10
     wgt=$11
-    base=$12
-    active=$13+0
-    rel=$14
+    focus=$12+0
+    awaiting=$13+0
+    awho=$14
+    base=$15
+    active=$16+0
+    rel=$17
 
     id=trim(id)
     parent=trim(parent)
@@ -583,6 +639,9 @@ sort -k1,1 -k2,2 -k3,3n -k4,4 "${tmp_edges}" > "${tmp_edges_sorted}"
     gateById[id]=gate
     srcById[id]=src
     wgtById[id]=wgt
+    focusById[id]=focus
+    awaitingById[id]=awaiting
+    awaitWhoById[id]=awho
     baseById[id]=base
     relById[id]=rel
     openDescById[id]=openDesc
@@ -600,7 +659,7 @@ sort -k1,1 -k2,2 -k3,3n -k4,4 "${tmp_edges}" > "${tmp_edges_sorted}"
     else children[p]=children[p] "\n" id
   }
 
-  function print_node(id, depth,    line,mi,icon,title,mark){
+  function print_node(id, depth,    line,mi,icon,title,mark,em,aw,lk){
     if (vis[id]) {
       print indent(depth) "- 🔁 " wlink(id) " (cycle?)"
       return
@@ -610,20 +669,39 @@ sort -k1,1 -k2,2 -k3,3n -k4,4 "${tmp_edges}" > "${tmp_edges_sorted}"
     mi = meta_icon(srcById[id], wgtById[id])
     icon = combo_icon(priById[id], gateById[id], bdById[id])
 
+    # emphasis marker (🎯 or ⏳)
+    em=""
+    if (focusById[id]==1) {
+      em="🎯"
+    } else if (awaitingById[id]==1) {
+      aw = trim(awaitWhoById[id])
+      aw = esc_inline(aw)
+      if (aw!="") em="⏳(" aw ")"
+      else        em="⏳"
+    }
+
+    lk = wlink(id)
+
+    # closed mark & link formatting
     if (closedById[id]==1) {
       mark = "✅"
       if (openDescById[id] > 0) mark = "⚠️✅"
-      title = "~~" wlink(id) "~~"
+      lk = "~~" lk "~~"
     } else {
       mark = ""
-      title = wlink(id)
     }
+
+    # 強調：🎯/⏳ が付くノートはリンクを太字にする
+    if (em!="") lk = "**" lk "**"
+
+    title = lk
 
     if (dueById[id] != "") line = "- " dueById[id] " " icon
     else                   line = "- " icon
 
     if (mark != "") line = line " " mark
     if (mi != "")   line = line " " mi
+    if (em != "")   line = line " " em
     line = line " " title
 
     print indent(depth) line
@@ -641,7 +719,7 @@ sort -k1,1 -k2,2 -k3,3n -k4,4 "${tmp_edges}" > "${tmp_edges_sorted}"
   END{
     if (N==0) { print "> 該当なし"; exit }
 
-    # 1) parent=ROOT のものを先に出す（あなたのサンプルに合わせる）
+    # 1) parent=ROOT のものを先に出す
     if (children["ROOT"]!="") {
       n = split(children["ROOT"], arr, "\n")
       for (i=1; i<=n; i++) {
@@ -651,7 +729,7 @@ sort -k1,1 -k2,2 -k3,3n -k4,4 "${tmp_edges}" > "${tmp_edges_sorted}"
       }
     }
 
-    # 2) ROOTに繋がらないノードも同じ列に続けて出す（セクション分け無し）
+    # 2) ROOTに繋がらないノードも続けて出す（セクション分け無し）
     for (i=1; i<=N; i++) {
       id = ids[i]
       if (id=="" || id=="ROOT") continue
