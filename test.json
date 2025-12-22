@@ -1,0 +1,34 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "MOCステータス更新 (Bash)",
+            "type": "shell",
+            // WindowsのGit Bashの標準的なパスを指定しています
+            // インストール場所が違う場合は適宜変更してください
+            "command": "C:\\Program Files\\Git\\bin\\bash.exe",
+            "args": [
+                "${workspaceFolder}/update_moc.sh", // スクリプトのパス
+                "${file}" // 現在開いているファイル
+            ],
+            "options": {
+                "shell": {
+                    // CMD経由ではなく直接bashを呼ぶための設定
+                    "executable": "C:\\Program Files\\Git\\bin\\bash.exe",
+                    "args": ["-c"]
+                }
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "echo": true,
+                "reveal": "silent",
+                "focus": false,
+                "panel": "shared"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
+}
