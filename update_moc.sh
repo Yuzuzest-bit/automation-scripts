@@ -21,10 +21,11 @@ fi
 # 相対パスでも壊れないように、親ディレクトリへ移動したあと basename で読む
 PARENT_DIR="$(cd "$(dirname "$TARGET_FILE")" && pwd -P)"
 BASE_NAME="$(basename "$TARGET_FILE")"
-
 cd "$PARENT_DIR"
 
 TEMP_FILE="$(mktemp)"
+cleanup() { rm -f "$TEMP_FILE"; }
+trap cleanup EXIT
 
 # 直前アイコンを「全部」剥がす（過去に2重3重に付いてしまった分も掃除）
 strip_status_icons_before_link() {
@@ -40,22 +41,54 @@ strip_status_icons_before_link() {
   printf '%s' "$s"
 }
 
+# Obsidian の [[note#heading]] / [[note#^block]] の "#以降" を落としてファイル名にする
+normalize_link_to_filename() {
+  local raw="$1"
+  raw="${raw#"${raw%%[![:space:]]*}"}"  # ltrim
+  raw="${raw%"${raw##*[![:space:]]}"}"  # rtrim
+
+  # 見出し/ブロック参照を除去
+  local base="${raw%%#*}"
+
+  # 念のため空なら空返し
+  if [[ -z "$base" ]]; then
+    printf '%s' ""
+    return
+  fi
+
+  # 拡張子補完（.md 以外を使わない前提ならこれでOK）
+  if [[ "$base" != *.md ]]; then
+    printf '%s' "${base}.md"
+  else
+    printf '%s' "$base"
+  fi
+}
+
+# closed 判定は「frontmatter(--- ... ---)の中だけ」を見る（行数制限なし）
+has_closed_in_frontmatter() {
+  local file="$1"
+  awk '
+    BEGIN { in=0; found=0; dash=0 }
+    NR==1 && $0=="---" { in=1; dash=1; next }
+    in==1 && $0=="---" { dash++; if (dash>=2) exit(found?0:1) }
+    in==1 && $0 ~ /^closed:[[:space:]]*.+/ { found=1 }
+    END {
+      # frontmatter が無い/閉じてない場合は「closedなし」扱い
+      exit(found?0:1)
+    }
+  ' "$file"
+}
+
 while IFS= read -r line; do
   # [[...]] を含む行だけ処理（最初の [[ を対象）
   if [[ "$line" =~ \[\[([^]|]+)(\|[^]]+)?\]\] ]]; then
-    LINK_TARGET="${BASH_REMATCH[1]}"
-
-    # 拡張子補完
-    if [[ "$LINK_TARGET" != *.md ]]; then
-      FILENAME="${LINK_TARGET}.md"
-    else
-      FILENAME="$LINK_TARGET"
-    fi
+    LINK_TARGET_RAW="${BASH_REMATCH[1]}"
+    FILENAME="$(normalize_link_to_filename "$LINK_TARGET_RAW")"
 
     # リンク先状態判定
     STATUS_ICON="$ICON_ERROR"
-    if [[ -f "$FILENAME" ]]; then
-      if head -n 20 "$FILENAME" | grep -qE '^closed:[[:space:]]*.+'; then
+    if [[ -n "$FILENAME" && -f "$FILENAME" ]]; then
+      if has_closed_in_frontmatter "$FILENAME"; then
         STATUS_ICON="$ICON_CLOSED"
       else
         STATUS_ICON="$ICON_OPEN"
@@ -77,4 +110,5 @@ while IFS= read -r line; do
 done < "$BASE_NAME"
 
 mv "$TEMP_FILE" "$BASE_NAME"
+trap - EXIT
 echo "Updated icons in: $PARENT_DIR/$BASE_NAME"
