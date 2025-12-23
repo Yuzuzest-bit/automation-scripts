@@ -1,68 +1,80 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-TARGET_FILE="$1"
-# アイコン定義
+TARGET_FILE="${1:-}"
+
+# アイコン定義（末尾の半角スペース込みが重要）
 ICON_CLOSED="✅ "
 ICON_OPEN="📖 "
 ICON_ERROR="⚠️ "
 
-# ターゲットファイルが存在しない場合は終了
-if [ ! -f "$TARGET_FILE" ]; then
-    echo "Error: File not found: $TARGET_FILE"
-    exit 1
+if [[ -z "$TARGET_FILE" ]]; then
+  echo "usage: $0 <target.md>" >&2
+  exit 2
 fi
 
-# 一時ファイル作成
-TEMP_FILE=$(mktemp)
+if [[ ! -f "$TARGET_FILE" ]]; then
+  echo "Error: File not found: $TARGET_FILE" >&2
+  exit 1
+fi
 
-# MOCファイルのあるディレクトリに移動（相対パス解決のため）
-PARENT_DIR=$(dirname "$TARGET_FILE")
-cd "$PARENT_DIR" || exit
+# 相対パスでも壊れないように、親ディレクトリへ移動したあと basename で読む
+PARENT_DIR="$(cd "$(dirname "$TARGET_FILE")" && pwd -P)"
+BASE_NAME="$(basename "$TARGET_FILE")"
 
-# 行ごとに処理
+cd "$PARENT_DIR"
+
+TEMP_FILE="$(mktemp)"
+
+# 直前アイコンを「全部」剥がす（過去に2重3重に付いてしまった分も掃除）
+strip_status_icons_before_link() {
+  local s="$1"
+  while :; do
+    case "$s" in
+      *"$ICON_CLOSED") s="${s%$ICON_CLOSED}" ;;
+      *"$ICON_OPEN")   s="${s%$ICON_OPEN}" ;;
+      *"$ICON_ERROR")  s="${s%$ICON_ERROR}" ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$s"
+}
+
 while IFS= read -r line; do
-    # 1. [[Filename]] が含まれているかチェック
-    # 正規表現: [[ (任意の文字) ]] をキャプチャ
-    if [[ "$line" =~ \[\[([^]|]+)(\|[^]]+)?\]\] ]]; then
-        LINK_TARGET="${BASH_REMATCH[1]}"
-        
-        # 拡張子 .md がなければ補完
-        if [[ "$LINK_TARGET" != *.md ]]; then
-            FILENAME="${LINK_TARGET}.md"
-        else
-            FILENAME="$LINK_TARGET"
-        fi
+  # [[...]] を含む行だけ処理（最初の [[ を対象）
+  if [[ "$line" =~ \[\[([^]|]+)(\|[^]]+)?\]\] ]]; then
+    LINK_TARGET="${BASH_REMATCH[1]}"
 
-        # 2. リンク先のファイル状態を確認
-        STATUS_ICON="$ICON_ERROR" # デフォルトはエラー（ファイルなし）
-
-        if [ -f "$FILENAME" ]; then
-            # 先頭20行から "closed: 20..." のパターンを探す
-            # grep -q でヒットするか確認
-            if head -n 20 "$FILENAME" | grep -qE "^closed:\s*.+"; then
-                STATUS_ICON="$ICON_CLOSED"
-            else
-                STATUS_ICON="$ICON_OPEN"
-            fi
-        fi
-
-        # 3. 行の整形
-        # まず既存のアイコンを削除 (sedを使用)
-        # リスト記号( - )の後ろ、または [[ の直前にあるアイコンを消す
-        CLEAN_LINE=$(echo "$line" | sed -E "s/($ICON_CLOSED|$ICON_OPEN|$ICON_ERROR)//g")
-
-        # [[ の直前に新しいアイコンを挿入
-        # 例: "- [[Note]]" -> "- 📖 [[Note]]"
-        NEW_LINE=$(echo "$CLEAN_LINE" | sed "s/\[\[/$STATUS_ICON\[\[/")
-        
-        echo "$NEW_LINE" >> "$TEMP_FILE"
+    # 拡張子補完
+    if [[ "$LINK_TARGET" != *.md ]]; then
+      FILENAME="${LINK_TARGET}.md"
     else
-        # リンクがない行はそのまま出力
-        echo "$line" >> "$TEMP_FILE"
+      FILENAME="$LINK_TARGET"
     fi
-done < "$TARGET_FILE"
 
-# 元のファイルを上書き
-mv "$TEMP_FILE" "$TARGET_FILE"
+    # リンク先状態判定
+    STATUS_ICON="$ICON_ERROR"
+    if [[ -f "$FILENAME" ]]; then
+      if head -n 20 "$FILENAME" | grep -qE '^closed:[[:space:]]*.+'; then
+        STATUS_ICON="$ICON_CLOSED"
+      else
+        STATUS_ICON="$ICON_OPEN"
+      fi
+    fi
 
-echo "Updated icons in: $TARGET_FILE"
+    # 「最初の [[ 」の手前(prefix)と、そこ以降(rest)に分割して、
+    # prefix末尾の既存アイコンだけを剥がしてから、1個だけ付け直す
+    prefix="${line%%\[\[*}"
+    rest="${line#"$prefix"}"
+
+    prefix="$(strip_status_icons_before_link "$prefix")"
+    NEW_LINE="${prefix}${STATUS_ICON}${rest}"
+
+    printf '%s\n' "$NEW_LINE" >> "$TEMP_FILE"
+  else
+    printf '%s\n' "$line" >> "$TEMP_FILE"
+  fi
+done < "$BASE_NAME"
+
+mv "$TEMP_FILE" "$BASE_NAME"
+echo "Updated icons in: $PARENT_DIR/$BASE_NAME"
