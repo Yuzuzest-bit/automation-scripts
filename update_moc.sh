@@ -68,14 +68,11 @@ normalize_link_to_filename() {
 has_closed_in_frontmatter() {
   local file="$1"
   awk '
-    BEGIN { in=0; found=0; dash=0 }
-    NR==1 && $0=="---" { in=1; dash=1; next }
-    in==1 && $0=="---" { dash++; if (dash>=2) exit(found?0:1) }
-    in==1 && $0 ~ /^closed:[[:space:]]*.+/ { found=1 }
-    END {
-      # frontmatter が無い/閉じてない場合は「closedなし」扱い
-      exit(found?0:1)
-    }
+    BEGIN { fm=0 }                          # fm: frontmatter中かどうか
+    NR==1 && $0=="---" { fm=1; next }       # 先頭が --- ならfrontmatter開始
+    fm==1 && $0=="---" { exit 1 }           # 2つ目の --- でfrontmatter終了（見つからなければNG）
+    fm==1 && $0 ~ /^closed:[[:space:]]*.+/ { exit 0 }  # found
+    END { exit 1 }                          # frontmatter無し/未検出
   ' "$file"
 }
 
