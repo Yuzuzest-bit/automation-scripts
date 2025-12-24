@@ -1,10 +1,31 @@
-"editor.tokenColorCustomizations": {
-  "textMateRules": [
-    { "name": "MD H1", "scope": "markup.heading.1.markdown", "settings": { "foreground": "#FF6B6B", "fontStyle": "bold" } },
-    { "name": "MD H2", "scope": "markup.heading.2.markdown", "settings": { "foreground": "#FFD93D", "fontStyle": "bold" } },
-    { "name": "MD H3", "scope": "markup.heading.3.markdown", "settings": { "foreground": "#6BCB77", "fontStyle": "bold" } },
-    { "name": "MD H4", "scope": "markup.heading.4.markdown", "settings": { "foreground": "#4D96FF", "fontStyle": "bold" } },
-    { "name": "MD H5", "scope": "markup.heading.5.markdown", "settings": { "foreground": "#9D4EDD", "fontStyle": "bold" } },
-    { "name": "MD H6", "scope": "markup.heading.6.markdown", "settings": { "foreground": "#A8A8A8", "fontStyle": "bold" } }
-  ]
+// まず全体の既定フラグ（^ を効かせるため m は必須）
+"highlight.regexFlags": "gim",
+
+"highlight.regexes": {
+  // H1: "# "
+  "(^#\\s)(.*$)": {
+    "filterLanguageRegex": "markdown",
+    "decorations": [
+      { "color": "#ff6b6b", "fontWeight": "bold" },  // "# " 側
+      { "color": "#ff6b6b", "fontWeight": "bold" }   // タイトル側
+    ]
+  },
+
+  // H2: "## "
+  "(^##\\s)(.*$)": {
+    "filterLanguageRegex": "markdown",
+    "decorations": [
+      { "color": "#ffd93d", "fontWeight": "bold" },
+      { "color": "#ffd93d", "fontWeight": "bold" }
+    ]
+  },
+
+  // H3: "### "
+  "(^###\\s)(.*$)": {
+    "filterLanguageRegex": "markdown",
+    "decorations": [
+      { "color": "#6bcb77", "fontWeight": "bold" },
+      { "color": "#6bcb77", "fontWeight": "bold" }
+    ]
+  }
 }
