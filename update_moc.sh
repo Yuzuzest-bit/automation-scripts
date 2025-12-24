@@ -68,11 +68,18 @@ normalize_link_to_filename() {
 has_closed_in_frontmatter() {
   local file="$1"
   awk '
-    BEGIN { fm=0 }                          # fm: frontmatter中かどうか
-    NR==1 && $0=="---" { fm=1; next }       # 先頭が --- ならfrontmatter開始
-    fm==1 && $0=="---" { exit 1 }           # 2つ目の --- でfrontmatter終了（見つからなければNG）
-    fm==1 && $0 ~ /^closed:[[:space:]]*.+/ { exit 0 }  # found
-    END { exit 1 }                          # frontmatter無し/未検出
+    BEGIN { fm=0; started=0 }
+    {
+      sub(/\r$/, "", $0)                # ← CRLF対策：行末CR除去
+      if (NR==1) sub(/^\xef\xbb\xbf/, "", $0)  # ← BOM対策
+    }
+    # 最初に出てきた --- を開始とする（先頭1行目固定にしない）
+    started==0 && $0=="---" { fm=1; started=1; next }
+
+    fm==1 && $0=="---" { exit 1 }       # frontmatter終了（見つからなければ closedなし）
+    fm==1 && $0 ~ /^closed:[[:space:]]*.+/ { exit 0 }
+
+    END { exit 1 }
   ' "$file"
 }
 
