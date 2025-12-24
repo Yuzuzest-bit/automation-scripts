@@ -106,60 +106,57 @@ has_closed_in_frontmatter() {
   ' "$file"
 }
 
-# Vault 内でリンク先ファイルを解決（キャッシュあり）
-declare -A RESOLVE_CACHE
+# Vault を1回だけ走査して、 basename(md) -> path を作る（高速化の要）
+# 注意: 同名ファイルが複数ある場合、先に見つかった1つだけ採用される
+declare -A NOTE_INDEX
+build_note_index() {
+  local root="$1"
+  while IFS= read -r -d '' f; do
+    local b
+    b="$(basename "$f")"
+    [[ -n "${NOTE_INDEX[$b]:-}" ]] && continue
+    NOTE_INDEX[$b]="$f"
+  done < <(find "$root" -type f \( -iname '*.md' -o -iname '*.markdown' \) -print0 2>/dev/null)
+}
 
+# インデックス作成（1回だけ）
+logd "Building note index..."
+build_note_index "$VAULT_ROOT"
+logd "Index size=${#NOTE_INDEX[@]}"
+
+# Vault 内でリンク先ファイルを解決（find禁止：インデックス参照で高速）
 resolve_note_path() {
   local link_raw="$1"
   local mdname
   mdname="$(normalize_link_to_mdname "$link_raw")"
   [[ -z "$mdname" ]] && printf '%s' "" && return
 
-  # Obsidian の [[folder/Note]] 対応：'/' を含むなら Vault root 基準
-  # そのまま mdname に含まれている想定（folder/Note.md）
-  local key="$mdname"
-  if [[ -n "${RESOLVE_CACHE[$key]:-}" ]]; then
-    printf '%s' "${RESOLVE_CACHE[$key]}"
-    return
-  fi
-
-  local p=""
-
+  # [[folder/Note]] は Vault root 基準で直指定（速い）
   if [[ "$mdname" == */* ]]; then
-    # Vault root 基準で直指定
-    p="$VAULT_ROOT/$mdname"
-    if [[ -f "$p" ]]; then
-      RESOLVE_CACHE[$key]="$p"
-      printf '%s' "$p"
-      return
-    fi
-    # 失敗なら find も試す（表記ゆれ/大文字小文字など）
-    p="$(find "$VAULT_ROOT" -type f -iname "$(basename "$mdname")" -path "*/${mdname%/*}/*" -print -quit 2>/dev/null || true)"
-    RESOLVE_CACHE[$key]="$p"
-    printf '%s' "$p"
+    local p="$VAULT_ROOT/$mdname"
+    [[ -f "$p" ]] && printf '%s' "$p" || printf '%s' ""
     return
   fi
 
-  # 1) 同じフォルダ（いま cd 済み）
-  if [[ -f "$mdname" ]]; then
-    p="$PARENT_DIR/$mdname"
-    RESOLVE_CACHE[$key]="$p"
-    printf '%s' "$p"
+  # 1) ターゲットノートと同じフォルダを優先
+  if [[ -f "$PARENT_DIR/$mdname" ]]; then
+    printf '%s' "$PARENT_DIR/$mdname"
     return
   fi
 
-  # 2) Vault ルート直下
+  # 2) Vault root 直下
   if [[ -f "$VAULT_ROOT/$mdname" ]]; then
-    p="$VAULT_ROOT/$mdname"
-    RESOLVE_CACHE[$key]="$p"
-    printf '%s' "$p"
+    printf '%s' "$VAULT_ROOT/$mdname"
     return
   fi
 
-  # 3) Vault 全体から検索（1件だけ）
-  p="$(find "$VAULT_ROOT" -type f -iname "$mdname" -print -quit 2>/dev/null || true)"
-  RESOLVE_CACHE[$key]="$p"
-  printf '%s' "$p"
+  # 3) インデックス参照（basename一致）
+  if [[ -n "${NOTE_INDEX[$mdname]:-}" && -f "${NOTE_INDEX[$mdname]}" ]]; then
+    printf '%s' "${NOTE_INDEX[$mdname]}"
+    return
+  fi
+
+  printf '%s' ""
 }
 
 while IFS= read -r line; do
