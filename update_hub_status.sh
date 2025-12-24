@@ -31,21 +31,17 @@ tmp="$(mktemp)"
 # - "## Now" ～ 次の "## Current/Recent/Past" まで
 extract_now_links() {
   local mocfile="$1"
+
+  # Now区間を抜き出す → CR(\r)除去 → [[target]] だけ抽出
   awk '
     BEGIN{in=0}
-    # 見出しの検出（大小無視は難しいので、Now/Current/Recent/Past の表記は固定推奨）
-    $0 ~ /^#+[[:space:]]+Now([[:space:]]|$)/     {in=1; next}
-    $0 ~ /^#+[[:space:]]+(Current|Recent|Past)([[:space:]]|$)/ {in=0}
-
-    in==1 {
-      line=$0
-      # 行の中に [[...]] が複数あっても拾う
-      while (match(line, /\[\[([^]|#]+)(\|[^]]+)?\]\]/, m)) {
-        print m[1]
-        line = substr(line, RSTART+RLENGTH)
-      }
-    }
-  ' "$mocfile"
+    $0 ~ /^#+[[:space:]]+Now/ {in=1; next}  # Now（...）やNow:でもOK
+    $0 ~ /^#+[[:space:]]+(Current|Recent|Past)/ {in=0}
+    in==1 {print}
+  ' "$mocfile" \
+  | tr -d '\r' \
+  | grep -oE '\[\[[^]|#]+' \
+  | sed 's/^\[\[//'
 }
 
 # ノートの状態判定（あなたの既存ルールに合わせる）
