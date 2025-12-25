@@ -37,16 +37,44 @@ ROOT="$(to_posix "$ROOT")"
 
 strip_summary_prefix() {
   local s="$1"
-  # 既存の要約を剥がす（雑でOK）
-  s="${s//${ICON_OK}/}"
-  s="${s//${ICON_ERROR}/}"
-  s="${s//${ICON_FOCUS}/}"
-  s="${s//${ICON_AWAIT}/}"
-  s="$(printf '%s' "$s" | sed -E 's/📖[[:space:]]*[0-9]+[[:space:]]*//g')"
-  s="${s//${ICON_OPEN}/}"
+
+  # 末尾の要約（✅ / ⚠️ / 🎯 / ⏳ / 📖 <n>）を「末尾から」何度でも剥がす
+  while :; do
+    local old="$s"
+
+    # CRLF対策（prefix末尾に\rが残る場合がある）
+    s="${s%$'\r'}"
+
+    # 末尾の空白を削る
+    while [[ "$s" =~ ^(.*)[[:space:]]+$ ]]; do
+      s="${BASH_REMATCH[1]}"
+    done
+
+    # 末尾の「📖 <数字>」を剥がす（スペースの有無ゆれに強く）
+    if [[ "$s" =~ ^(.*)📖[[:space:]]*[0-9]+$ ]]; then
+      s="${BASH_REMATCH[1]}"
+      continue
+    fi
+
+    # 末尾のアイコンを剥がす（スペース付き/なし両対応）
+    case "$s" in
+      *"✅") s="${s%✅}"; continue ;;
+      *"⚠️") s="${s%⚠️}"; continue ;;
+      *"🎯") s="${s%🎯}"; continue ;;
+      *"⏳") s="${s%⏳}"; continue ;;
+    esac
+
+    # 変化がなければ終了
+    [[ "$s" == "$old" ]] && break
+  done
+
+  # 末尾の空白を最後にもう一度
+  while [[ "$s" =~ ^(.*)[[:space:]]+$ ]]; do
+    s="${BASH_REMATCH[1]}"
+  done
+
   printf '%s' "$s"
 }
-
 # ----------------------------
 # 解決パスのキャッシュ（find連発を避ける）
 declare -A RESOLVE_CACHE
