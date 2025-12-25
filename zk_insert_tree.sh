@@ -85,10 +85,10 @@ strip_md() {
 extract_frontmatter() {
   local file="$1"
   awk '
-    BEGIN{in=0; id=""; parent=""; seen=0}
-    NR==1 && $0=="---" {in=1; next}
-    in==1 && $0=="---" {in=0; seen=1; exit}
-    in==1 {
+    BEGIN{in_fm=0; id=""; parent=""}
+    NR==1 && $0=="---" {in_fm=1; next}
+    in_fm==1 && $0=="---" {in_fm=0; exit}
+    in_fm==1 {
       if ($0 ~ /^id:[[:space:]]*/) {
         sub(/^id:[[:space:]]*/, "", $0); id=$0
       }
@@ -97,7 +97,6 @@ extract_frontmatter() {
       }
     }
     END{
-      # 出力: id \t parent
       printf("%s\t%s\n", id, parent)
     }
   ' "$file"
