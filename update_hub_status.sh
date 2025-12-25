@@ -37,41 +37,69 @@ ROOT="$(to_posix "$ROOT")"
 
 strip_summary_prefix() {
   local s="$1"
+  # 既存の要約を剥がす（雑でOK）
   s="${s//${ICON_OK}/}"
   s="${s//${ICON_ERROR}/}"
   s="${s//${ICON_FOCUS}/}"
   s="${s//${ICON_AWAIT}/}"
-  # 「📖 12 」を落とす
   s="$(printf '%s' "$s" | sed -E 's/📖[[:space:]]*[0-9]+[[:space:]]*//g')"
   s="${s//${ICON_OPEN}/}"
   printf '%s' "$s"
 }
 
-# リンクターゲット → ファイル解決
-# 1) HUBからの相対
-# 2) ROOT配下をfind（同名が複数あったら先頭を使う）
-resolve_note_file() {
+# ----------------------------
+# 解決パスのキャッシュ（find連発を避ける）
+declare -A RESOLVE_CACHE
+
+# target → 実ファイル解決（ROOT配下も検索）
+# base_dir（呼び出し元ファイルのディレクトリ）も考慮
+resolve_note_file_from() {
   local target="$1"
+  local base_dir="$2"
+
+  # Obsidian/Logseq っぽい #heading を落とす
+  target="${target%%#*}"
+
   local f="$target"
   [[ "$f" == *.md ]] || f="${f}.md"
 
-  # 相対パス（HUBの場所基準）
+  # 1) パス付きならそのまま解決（base_dir基準）
+  if [[ "$f" == */* || "$f" == *\\* ]]; then
+    local fp
+    fp="$(to_posix "$f")"
+    if [[ -f "$fp" ]]; then printf '%s\n' "$fp"; return; fi
+    if [[ -f "$base_dir/$fp" ]]; then printf '%s\n' "$base_dir/$fp"; return; fi
+  fi
+
+  # 2) base_dir 内
+  if [[ -f "$base_dir/$f" ]]; then
+    printf '%s\n' "$base_dir/$f"
+    return
+  fi
+
+  # 3) HUBからの相対（HUB_DIR）
   if [[ -f "$f" ]]; then
     printf '%s\n' "$f"
     return
   fi
 
-  # ROOT配下を検索（basename一致）
+  # 4) ROOT配下をfind（basename一致、キャッシュ）
   local base
   base="$(basename "$f")"
-  local hit
-  hit="$(find "$ROOT" -type f -name "$base" 2>/dev/null | head -n 1 || true)"
-  if [[ -n "$hit" ]]; then
-    printf '%s\n' "$hit"
+  if [[ -n "${RESOLVE_CACHE[$base]+x}" ]]; then
+    [[ "${RESOLVE_CACHE[$base]}" == "-" ]] && printf '%s\n' "" || printf '%s\n' "${RESOLVE_CACHE[$base]}"
     return
   fi
 
-  printf '%s\n' ""
+  local hit
+  hit="$(find "$ROOT" -type f -name "$base" 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$hit" ]]; then
+    RESOLVE_CACHE["$base"]="$hit"
+    printf '%s\n' "$hit"
+  else
+    RESOLVE_CACHE["$base"]="-"
+    printf '%s\n' ""
+  fi
 }
 
 # MOC判定：NOWマーカーがあるか
@@ -91,6 +119,24 @@ extract_now_block() {
   ' "$f" | tr -d '\r'
 }
 
+# NOWブロックから [[target]] を全部抜く（|alias もOK）
+extract_links_from_block() {
+  # stdin -> targets
+  sed -E 's/\r$//' \
+  | grep -oE '\[\[[^]]+\]\]' \
+  | sed -E 's/^\[\[//; s/\]\]$//' \
+  | sed -E 's/\|.*$//'
+}
+
+is_closed_file() {
+  local f="$1"
+  # 先頭40行以内に closed: があればクローズ扱い
+  head -n 40 "$f" | grep -qE '^closed:[[:space:]]*.+' 2>/dev/null
+}
+
+has_focus() { grep -qi -m1 '@focus' "$1" 2>/dev/null; }
+has_await() { grep -qi -m1 '@awaiting' "$1" 2>/dev/null; }
+
 summarize_moc_now() {
   local mocfile="$1"
 
@@ -106,11 +152,32 @@ summarize_moc_now() {
     return
   fi
 
-  local open_cnt err_cnt focus_cnt await_cnt
-  open_cnt="$(printf '%s\n' "$block" | grep -o "📖" | wc -l | tr -d ' ')"
-  err_cnt="$(printf '%s\n' "$block" | grep -o "⚠️" | wc -l | tr -d ' ')"
-  focus_cnt="$(printf '%s\n' "$block" | grep -o "🎯" | wc -l | tr -d ' ')"
-  await_cnt="$(printf '%s\n' "$block" | grep -o "⏳" | wc -l | tr -d ' ')"
+  local moc_dir
+  moc_dir="$(cd "$(dirname "$mocfile")" && pwd -P)"
+
+  local open_cnt=0 err_cnt=0 focus_cnt=0 await_cnt=0
+
+  while IFS= read -r target; do
+    [[ -n "$target" ]] || continue
+
+    local fp
+    fp="$(resolve_note_file_from "$target" "$moc_dir")"
+    if [[ -z "$fp" || ! -f "$fp" ]]; then
+      err_cnt=$((err_cnt+1))
+      continue
+    fi
+
+    if ! is_closed_file "$fp"; then
+      open_cnt=$((open_cnt+1))
+    fi
+
+    # 🎯優先（個別行と同じ思想）
+    if has_focus "$fp"; then
+      focus_cnt=$((focus_cnt+1))
+    elif has_await "$fp"; then
+      await_cnt=$((await_cnt+1))
+    fi
+  done < <(printf '%s\n' "$block" | extract_links_from_block)
 
   local s=""
   if (( err_cnt > 0 )); then
@@ -120,19 +187,27 @@ summarize_moc_now() {
   else
     s+="${ICON_OK}"
   fi
-  (( focus_cnt > 0 )) && s+="${ICON_FOCUS}"
-  (( await_cnt > 0 )) && s+="${ICON_AWAIT}"
+
+  # 要約は 🎯 優先（両方出したければここを変更）
+  if (( focus_cnt > 0 )); then
+    s+="${ICON_FOCUS}"
+  elif (( await_cnt > 0 )); then
+    s+="${ICON_AWAIT}"
+  fi
 
   printf '%s' "$s"
 }
 
+# ----------------------------
 tmp="$(mktemp)"
 
 while IFS= read -r line; do
   # 行内の最初の [[...]] を対象（HUBは通常1行1リンク想定）
   if [[ "$line" =~ \[\[([^]|]+)(\|[^]]+)?\]\] ]]; then
     target="${BASH_REMATCH[1]}"
-    note_path="$(resolve_note_file "$target")"
+
+    # HUBリンク先の実ファイル解決（HUB基準 + ROOT）
+    note_path="$(resolve_note_file_from "$target" "$HUB_DIR")"
 
     if [[ -n "$note_path" ]]; then
       summary="$(summarize_moc_now "$note_path")"
