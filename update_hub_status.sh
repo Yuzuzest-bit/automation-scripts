@@ -84,10 +84,10 @@ is_moc_file() {
 extract_now_block() {
   local f="$1"
   awk '
-    BEGIN{in=0}
-    /<!--NOW:BEGIN-->/{in=1; next}
-    /<!--NOW:END-->/{in=0}
-    in==1{print}
+    BEGIN{inNow=0}
+    /<!--NOW:BEGIN-->/{inNow=1; next}
+    /<!--NOW:END-->/{inNow=0; next}
+    inNow==1{print}
   ' "$f" | tr -d '\r'
 }
 
