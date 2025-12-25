@@ -32,18 +32,44 @@ TEMP_FILE="$(mktemp)"
 
 # 直前アイコンを「全部」剥がす（過去に2重3重に付いてしまった分も掃除）
 # 追加: 🎯 / ⏳ も剥がして「更新」できるようにする
-strip_icons_before_link() {
+strip_summary_prefix() {
   local s="$1"
+
+  # 末尾の要約（✅ / ⚠️ / 🎯 / ⏳ / 📖 <n>）を「末尾から」何度でも剥がす
   while :; do
+    local old="$s"
+
+    # CRLF対策（prefix末尾に\rが残る場合がある）
+    s="${s%$'\r'}"
+
+    # 末尾の空白を削る
+    while [[ "$s" =~ ^(.*)[[:space:]]+$ ]]; do
+      s="${BASH_REMATCH[1]}"
+    done
+
+    # 末尾の「📖 <数字>」を剥がす（スペースの有無ゆれに強く）
+    if [[ "$s" =~ ^(.*)📖[[:space:]]*[0-9]+$ ]]; then
+      s="${BASH_REMATCH[1]}"
+      continue
+    fi
+
+    # 末尾のアイコンを剥がす（スペース付き/なし両対応）
     case "$s" in
-      *"$ICON_CLOSED") s="${s%$ICON_CLOSED}" ;;
-      *"$ICON_OPEN")   s="${s%$ICON_OPEN}" ;;
-      *"$ICON_ERROR")  s="${s%$ICON_ERROR}" ;;
-      *"$ICON_FOCUS")  s="${s%$ICON_FOCUS}" ;;
-      *"$ICON_AWAIT")  s="${s%$ICON_AWAIT}" ;;
-      *) break ;;
+      *"✅") s="${s%✅}"; continue ;;
+      *"⚠️") s="${s%⚠️}"; continue ;;
+      *"🎯") s="${s%🎯}"; continue ;;
+      *"⏳") s="${s%⏳}"; continue ;;
     esac
+
+    # 変化がなければ終了
+    [[ "$s" == "$old" ]] && break
   done
+
+  # 末尾の空白を最後にもう一度
+  while [[ "$s" =~ ^(.*)[[:space:]]+$ ]]; do
+    s="${BASH_REMATCH[1]}"
+  done
+
   printf '%s' "$s"
 }
 
