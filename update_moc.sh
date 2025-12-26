@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
+# 文字化け防止
+export LC_ALL=C.UTF-8
 set -euo pipefail
 
 TARGET_FILE="${1:-}"
 
 # --- 設定 ---
-# 検索の起点となるディレクトリ。
-# デフォルトは実行した場所（.）ですが、特定のパス（~/Documents/Notes など）に固定も可能です。
+# 検索の起点（Git Bash等で実行している現在のディレクトリ）
 VAULT_ROOT="$(pwd -P)"
 
 # アイコン定義
@@ -14,6 +15,7 @@ ICON_OPEN="📖 "
 ICON_ERROR="⚠️ "
 ICON_FOCUS="🎯 "
 ICON_AWAIT="⏳ "
+ICON_BLOCK="🧱 "
 
 if [[ -z "$TARGET_FILE" ]]; then
   echo "usage: $0 <target.md>" >&2
@@ -25,100 +27,107 @@ if [[ ! -f "$TARGET_FILE" ]]; then
   exit 1
 fi
 
-# ターゲットファイルの情報を取得
 PARENT_DIR="$(cd "$(dirname "$TARGET_FILE")" && pwd -P)"
 BASE_NAME="$(basename "$TARGET_FILE")"
 TEMP_FILE="$(mktemp)"
 
-# アイコン除去関数
-strip_icons_before_link() {
+# 既存のアイコンや (テキスト) を削除する関数
+# 例: "✅ 🧱 (待機中) [[Link]]" -> "[[Link]]" に戻すため
+strip_all_decorations() {
   local s="$1"
-  while :; do
-    case "$s" in
-      *"$ICON_CLOSED") s="${s%$ICON_CLOSED}" ;;
-      *"$ICON_OPEN")   s="${s%$ICON_OPEN}" ;;
-      *"$ICON_ERROR")  s="${s%$ICON_ERROR}" ;;
-      *"$ICON_FOCUS")  s="${s%$ICON_FOCUS}" ;;
-      *"$ICON_AWAIT")  s="${s%$ICON_AWAIT}" ;;
-      *) break ;;
-    esac
+  # アイコンの除去
+  for icon in "$ICON_CLOSED" "$ICON_OPEN" "$ICON_ERROR" "$ICON_FOCUS" "$ICON_AWAIT" "$ICON_BLOCK"; do
+    s="${s//$icon/}"
   done
-  printf '%s' "$s"
+  # 末尾の "(...)" 形式のテキストを削除（必要に応じて調整）
+  s=$(echo "$s" | sed -E 's/[[:space:]]*\([^)]+\)[[:space:]]*$//')
+  # 前後の空白をトリム
+  echo "$s" | sed -E 's/[[:space:]]+$//'
 }
 
-# リンク先のパスを解決する関数
-# 1. カレントディレクトリ(PARENT_DIR)にあるか確認
-# 2. なければ VAULT_ROOT 以下を検索
+# フォルダを跨いでファイルを探す
 resolve_file_path() {
   local target_name="$1"
-  
-  # A. 同じフォルダにある場合（最速）
   if [[ -f "$PARENT_DIR/$target_name" ]]; then
     echo "$PARENT_DIR/$target_name"
     return
   fi
-
-  # B. 他のフォルダにある場合（findで検索）
-  # -maxdepth 5 などに制限するとさらに高速化できます
-  local found
-  found=$(find "$VAULT_ROOT" -name "$target_name" -print -quit 2>/dev/null)
-  
-  if [[ -n "$found" ]]; then
-    echo "$found"
-  fi
+  # findで見つける（1つ見つかったら即終了）
+  find "$VAULT_ROOT" -maxdepth 4 -name "$target_name" -not -path "*/.*" -print -quit 2>/dev/null
 }
 
-detect_mark_icon() {
-  local file="$1"
-  [[ -f "$file" ]] || { printf ''; return; }
-  if grep -qi -m1 '@focus' "$file"; then
-    printf '%s' "$ICON_FOCUS"
-    return
+# リンク先の詳細状態（アイコンとテキスト）を取得
+get_link_details() {
+  local f_path="$1"
+  [[ ! -f "$f_path" ]] && { echo "$ICON_ERROR|"; return; }
+
+  local status_icon=""
+  local mark_icon=""
+  local extra_info=""
+
+  # 1. Closed 判定 (CRLF対策)
+  if head -n 30 "$f_path" | tr -d '\r' | grep -qE '^closed:[[:space:]]*.+'; then
+    status_icon="$ICON_CLOSED"
+  else
+    status_icon="$ICON_OPEN"
   fi
-  if grep -qi -m1 '@awaiting' "$file"; then
-    printf '%s' "$ICON_AWAIT"
-    return
+
+  # 2. @focus, @blocked, @awaiting 判定とテキスト抽出
+  # 最初に見つかった行を対象にする
+  local match
+  match=$(grep -niE -m1 '@focus|@blocked|@awaiting' "$f_path" | tr -d '\r' || true)
+
+  if [[ -n "$match" ]]; then
+    local line_content="${match#*:}" # 行番号を除去
+
+    if [[ "$line_content" =~ @focus ]]; then
+      mark_icon="$ICON_FOCUS"
+      # タグ以降の文字を抽出
+      extra_info=$(echo "$line_content" | sed -E 's/.*@focus[[:space:]]*//I')
+    elif [[ "$line_content" =~ @blocked ]]; then
+      mark_icon="$ICON_BLOCK"
+      extra_info=$(echo "$line_content" | sed -E 's/.*@blocked[[:space:]]*//I')
+    elif [[ "$line_content" =~ @awaiting ]]; then
+      mark_icon="$ICON_AWAIT"
+      extra_info=$(echo "$line_content" | sed -E 's/.*@awaiting[[:space:]]*//I')
+    fi
   fi
-  printf ''
+
+  # アイコンとテキストを結合して返す (textがあればカッコで括る)
+  local info_str=""
+  [[ -n "$extra_info" ]] && info_str="($extra_info) "
+
+  echo "${status_icon}${mark_icon}|${info_str}"
 }
 
-# 処理開始
-while IFS= read -r line; do
+# 処理メイン
+while IFS= read -r line || [[ -n "$line" ]]; do
+  # [[リンク]] を含む行を処理
   if [[ "$line" =~ \[\[([^]|]+)(\|[^]]+)?\]\] ]]; then
     LINK_TARGET="${BASH_REMATCH[1]}"
-    
-    if [[ "$LINK_TARGET" != *.md ]]; then
-      FILENAME="${LINK_TARGET}.md"
-    else
-      FILENAME="$LINK_TARGET"
-    fi
+    [[ "$LINK_TARGET" != *.md ]] && FILENAME="${LINK_TARGET}.md" || FILENAME="$LINK_TARGET"
 
-    # ファイルの場所を特定
+    # ファイル探索
     RESOLVED_PATH="$(resolve_file_path "$FILENAME")"
 
-    STATUS_ICON="$ICON_ERROR"
-    MARK_ICON=""
+    # 詳細情報の取得
+    DETAILS=$(get_link_details "$RESOLVED_PATH")
+    ICONS="${DETAILS%|*}"
+    INFO="${DETAILS#*|}"
 
-    if [[ -n "$RESOLVED_PATH" ]]; then
-      # 状態判定
-      if head -n 20 "$RESOLVED_PATH" | grep -qE '^closed:[[:space:]]*.+'; then
-        STATUS_ICON="$ICON_CLOSED"
-      else
-        STATUS_ICON="$ICON_OPEN"
-      fi
-      # Focus/Awaiting 判定
-      MARK_ICON="$(detect_mark_icon "$RESOLVED_PATH")"
-    fi
-
+    # 行の構築
     prefix="${line%%\[\[*}"
     rest="${line#"$prefix"}"
-    prefix="$(strip_icons_before_link "$prefix")"
-    
-    echo "${prefix}${STATUS_ICON}${MARK_ICON}${rest}" >> "$TEMP_FILE"
+
+    # 既存の装飾を剥がす
+    prefix="$(strip_all_decorations "$prefix")"
+
+    # 新しい行を作成（アイコン + テキスト + 残りの行）
+    echo "${prefix}${ICONS}${INFO}${rest}" >> "$TEMP_FILE"
   else
     echo "$line" >> "$TEMP_FILE"
   fi
 done < "$TARGET_FILE"
 
 mv "$TEMP_FILE" "$TARGET_FILE"
-echo "Updated: $TARGET_FILE"
+echo "Done: $TARGET_FILE"
