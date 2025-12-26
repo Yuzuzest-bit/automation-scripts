@@ -1,0 +1,28 @@
+    {
+      "label": "Tree: Prune to Level 1",
+      "type": "shell",
+      "command": "bash",
+      "args": ["${workspaceFolder}/zk_prune_tree.sh", "1"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Tree: Prune to Level 2",
+      "type": "shell",
+      "command": "bash",
+      "args": ["${workspaceFolder}/zk_prune_tree.sh", "2"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Tree: Prune to Level 3",
+      "type": "shell",
+      "command": "bash",
+      "args": ["${workspaceFolder}/zk_prune_tree.sh", "3"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Tree: Prune to Level 4",
+      "type": "shell",
+      "command": "bash",
+      "args": ["${workspaceFolder}/zk_prune_tree.sh", "4"],
+      "problemMatcher": []
+    },
