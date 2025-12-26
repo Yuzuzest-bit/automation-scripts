@@ -1,0 +1,77 @@
+// --- TREE_VIEW ステータス強調設定 ---
+
+// 🎯 Focus: 最優先（深い紺色 + 鮮やかなオレンジのボーダー）
+"(^.*🎯.*$)": {
+  "filterLanguageRegex": "markdown|mdx",
+  "regexFlags": "gm",
+  "decorations": [
+    {
+      "isWholeLine": true,
+      "backgroundColor": "#1a1b26", 
+      "borderColor": "#fab387",
+      "borderStyle": "solid",
+      "borderWidth": "0 0 0 4px"
+    }
+  ]
+},
+
+// 🧱 Blocked: 閉塞（深いボルドー + 赤色のボーダー）
+"(^.*🧱.*$)": {
+  "filterLanguageRegex": "markdown|mdx",
+  "regexFlags": "gm",
+  "decorations": [
+    {
+      "isWholeLine": true,
+      "backgroundColor": "#2a1a1a",
+      "borderColor": "#f38ba8",
+      "borderStyle": "solid",
+      "borderWidth": "0 0 0 4px"
+    }
+  ]
+},
+
+// ⏳ Awaiting: 待機（深いアンバー + 黄色のボーダー）
+"(^.*⏳.*$)": {
+  "filterLanguageRegex": "markdown|mdx",
+  "regexFlags": "gm",
+  "decorations": [
+    {
+      "isWholeLine": true,
+      "backgroundColor": "#2a241a",
+      "borderColor": "#f9e2af",
+      "borderStyle": "solid",
+      "borderWidth": "0 0 0 4px"
+    }
+  ]
+},
+
+// 🔁 / ⚠️ Cycle & Error: 異常（暗いピンク + 鮮烈な赤の太いボーダー）
+"(^.*(🔁|⚠️).*$)": {
+  "filterLanguageRegex": "markdown|mdx",
+  "regexFlags": "gm",
+  "decorations": [
+    {
+      "isWholeLine": true,
+      "backgroundColor": "#311b1b",
+      "borderColor": "#eba0ac",
+      "borderStyle": "solid",
+      "borderWidth": "0 0 0 8px"
+    }
+  ]
+},
+
+// ✅ Closed: 完了（極めて暗いグレー + 控えめなグレーのボーダー）
+// 完了したものは背景を沈ませて、未完了を目立たせる設計
+"(^.*✅.*$)": {
+  "filterLanguageRegex": "markdown|mdx",
+  "regexFlags": "gm",
+  "decorations": [
+    {
+      "isWholeLine": true,
+      "backgroundColor": "#0d0d0d",
+      "borderColor": "#585b70",
+      "borderStyle": "solid",
+      "borderWidth": "0 0 0 2px"
+    }
+  ]
+}
