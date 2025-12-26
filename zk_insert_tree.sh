@@ -14,6 +14,7 @@ usage() {
 usage: zk_insert_tree.sh <current.md> [--root ROOT] [--max-depth N] [--title "## Tree"]
 - TARGET_FILE: VS Code の ${file} を想定
 - 子ノートは frontmatter の parent: で親を指す（id推奨 / ファイル名でも可）
+- 循環参照があれば、その枝は "🔁 (cycle)" と表示して探索を中断
 EOF
   exit 2
 }
@@ -21,7 +22,6 @@ EOF
 to_posix() {
   local p="$1"
   if command -v cygpath >/dev/null 2>&1; then
-    # Windows(Git Bash) っぽいときだけ変換
     if [[ "$p" =~ ^[A-Za-z]:[\\/]|\\ ]]; then
       cygpath -u "$p"
       return
@@ -46,6 +46,9 @@ abs_path() {
 # ---- args ----
 [[ -z "$TARGET_FILE" ]] && usage
 
+# 先頭引数（ファイル）を消費してからオプション解析
+shift || true
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --root) ROOT="${2:-}"; shift 2;;
@@ -69,7 +72,6 @@ rel_from_root() {
   local full="$1"
   full="$(abs_path "$full")"
   local r="$ROOT"
-  # 末尾 / を揃える
   r="${r%/}/"
   full="${full#"$r"}"
   printf '%s\n' "$full"
@@ -118,11 +120,10 @@ should_ignore() {
   local ig="$ROOT/$IGNORE_FILE"
   if [[ -f "$ig" ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
-      line="${line%%#*}"             # コメント除去
+      line="${line%%#*}" # コメント除去
       line="${line#"${line%%[![:space:]]*}"}" # trim left
       line="${line%"${line##*[![:space:]]}"}" # trim right
       [[ -z "$line" ]] && continue
-      # 行が含まれていたら除外（ディレクトリ名でもファイルでもOK）
       if [[ "$rel" == *"$line"* ]]; then
         return 0
       fi
@@ -145,12 +146,12 @@ if [[ -z "$ROOT_ID" ]]; then
   ROOT_ID="$ROOT_BASE"
 fi
 
-# ---- 全ノートを走査して、(canon, aliases, parent, link) をTSVにする ----
+# ---- 全ノートを走査して、(canon, parent, link, basename, id) をTSVにする ----
 MAP_TSV="$(mktemp)"
+TREE_MD="$(mktemp)"
+OUT_TMP="$(mktemp)"
 trap 'rm -f "$MAP_TSV" "$TREE_MD" "$OUT_TMP" 2>/dev/null || true' EXIT
 
-# TSV列:
-# canon   parent_raw   link(path without .md)   basename   id
 while IFS= read -r -d '' f; do
   rel="$(rel_from_root "$f")"
   should_ignore "$rel" && continue
@@ -169,17 +170,13 @@ while IFS= read -r -d '' f; do
   printf '%s\t%s\t%s\t%s\t%s\n' "$canon" "$parent" "$link" "$base" "$id" >> "$MAP_TSV"
 done < <(find "$ROOT" -type f -name '*.md' -print0)
 
-# ---- ツリー生成（awkで2パス：alias→canon解決してから children を組む） ----
-TREE_MD="$(mktemp)"
-
+# ---- ツリー生成（alias解決 → children構築 → 再帰表示 / cycle検出） ----
 awk -v rootCanon="$ROOT_ID" -v rootBase="$ROOT_BASE" -v rootLink="$ROOT_LINK" -v maxDepth="$MAX_DEPTH" '
-BEGIN {
-  FS="\t"
-}
+BEGIN { FS="\t" }
 {
   canon=$1; parent=$2; link=$3; base=$4; id=$5
 
-  # alias -> canon を登録（id / basename / link(path) を全部alias扱い）
+  # alias -> canon（id / basename / link(path) を全部alias扱い）
   if (id != "") alias2canon[id]=canon
   if (base != "") alias2canon[base]=canon
   if (link != "") alias2canon[link]=canon
@@ -189,7 +186,6 @@ BEGIN {
   canon2base[canon]=base
   canon2id[canon]=id
 
-  # 後で2パスするため保持
   lines[++n]= $0
 }
 END {
@@ -199,7 +195,7 @@ END {
   if (!(root in canon2link) && (rootBase in alias2canon)) root = alias2canon[rootBase]
   if (!(root in canon2link) && (rootLink in alias2canon)) root = alias2canon[rootLink]
 
-  # 2パス目：children を作る
+  # children を作る
   for (i=1; i<=n; i++) {
     split(lines[i], a, "\t")
     canon=a[1]; parent=a[2]
@@ -214,21 +210,22 @@ END {
   print "- **[[" canon2link[root] "]]**"
 
   visited[root]=1
+  onpath[root]=1
   total = print_tree(root, 1)
+  onpath[root]=0
 
   print ""
   print "> descendants: " total
 }
 
-function print_tree(node, depth,   list, j, child, cnt, arrn, k, key) {
+function print_tree(node, depth,   list, j, child, cnt, arrn, k) {
   if (depth > maxDepth) return 0
 
   list = children[node]
   if (list == "") return 0
 
-  # 子をソートっぽく安定させる（linkで重複しづらい）
+  # 子をソートっぽく安定させる（linkで）
   arrn = split(list, tmp, "\n")
-  # tmp[1..arrn] のうち空を除去しつつ、簡易ソート（O(n^2)だが数が少ない前提）
   m=0
   for (j=1; j<=arrn; j++) if (tmp[j]!="") arr[++m]=tmp[j]
   for (j=1; j<=m; j++) {
@@ -243,23 +240,34 @@ function print_tree(node, depth,   list, j, child, cnt, arrn, k, key) {
   for (j=1; j<=m; j++) {
     child = arr[j]
     if (child=="") continue
-    if (visited[child]) continue
-    visited[child]=1
 
     indent = ""
     for (k=0; k<depth; k++) indent = indent "  "
 
+    # 循環検出：探索中の経路上に child がいたら、その枝は中断
+    if (onpath[child]) {
+      print indent "- [[" canon2link[child] "]] 🔁 (cycle)"
+      continue
+    }
+
+    # 既出ノードは省略（表示を膨らませない）
+    if (visited[child]) {
+      print indent "- [[" canon2link[child] "]] ↩︎ (already shown)"
+      continue
+    }
+
+    visited[child]=1
+    onpath[child]=1
     print indent "- [[" canon2link[child] "]]"
     cnt += 1
     cnt += print_tree(child, depth+1)
+    onpath[child]=0
   }
   return cnt
 }
 ' "$MAP_TSV" > "$TREE_MD"
 
 # ---- ノートへ挿入（マーカーがあれば置換、無ければ末尾に追記） ----
-OUT_TMP="$(mktemp)"
-
 if grep -qF "$MARK_BEGIN" "$TARGET_FILE" && grep -qF "$MARK_END" "$TARGET_FILE"; then
   awk -v b="$MARK_BEGIN" -v e="$MARK_END" -v tf="$TREE_MD" '
     function dump_tree(   l) {
@@ -273,7 +281,6 @@ if grep -qF "$MARK_BEGIN" "$TARGET_FILE" && grep -qF "$MARK_END" "$TARGET_FILE";
     { print }
   ' "$TARGET_FILE" > "$OUT_TMP"
 else
-  # frontmatter直下を避けつつ、末尾にセクション追加
   {
     cat "$TARGET_FILE"
     echo ""
