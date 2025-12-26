@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # zk_insert_wikilink_tree.sh
 #
-# 「今開いているノート」を起点に、本文中の [[wikilink]]（前向きリンク）を辿ってツリーを生成し、
-# ノート内に挿入/更新する。
+# 起点ノート -> 本文中の [[wikilink]]（前向きリンク）を辿ってツリー生成し、
+# 起点ノート内に挿入/更新する。
 #
-# - id/parent に依存しない
+# 対応:
+# - Windows CRLF / UTF-8 BOM / frontmatter区切りの空白（--- / ...）に強い
 # - rg 不要
-# - Vault root は .obsidian を目印に自動検出（無ければファイルのあるフォルダ）
+# - Vault root は .obsidian を上へ辿って自動検出（無ければ起点ノートのフォルダ）
 # - 循環参照は 🔁 (cycle) で枝を中断
-# - [[...]] 抽出はコードブロック判定なし（``` 閉じ忘れでも吸い込まれない）
-# - 「見つからなかったリンク」も ⚠️ (not found) で出す（原因が一発で見える）
+# - 参照先が見つからないリンクは ⚠️ (not found) で可視化
 #
 # 使い方:
 #   ./zk_insert_wikilink_tree.sh <current.md>
@@ -17,10 +17,6 @@
 #   --root ROOT
 #   --max-depth N   (0=無制限)
 #   --title "## Tree"
-#
-# 診断:
-#   DIAG=1 を付けると各ノートの抽出リンク数だけ出す
-#     DIAG=1 ./zk_insert_wikilink_tree.sh xxx.md
 
 set -Eeuo pipefail
 trap 'ec=$?; echo "[ERR] exit=$ec line=$LINENO file=${BASH_SOURCE[0]} cmd=$BASH_COMMAND" >&2' ERR
@@ -73,9 +69,7 @@ detect_vault_root() {
       printf '%s\n' "$d"
       return 0
     fi
-    if [[ "$d" == "/" ]]; then
-      return 1
-    fi
+    [[ "$d" == "/" ]] && return 1
     d="$(cd "$d/.." && pwd -P)"
   done
 }
@@ -99,20 +93,18 @@ done
 TARGET_FILE="$(abs_path "$TARGET_FILE")"
 [[ -f "$TARGET_FILE" ]] || { echo "[ERR] File not found: $TARGET_FILE" >&2; exit 1; }
 
-if [[ -n "${ROOT}" ]]; then
+if [[ -n "$ROOT" ]]; then
   ROOT="$(abs_path "$ROOT")"
 else
-  if ROOT="$(detect_vault_root "$TARGET_FILE")"; then
-    :
-  else
+  if ROOT="$(detect_vault_root "$TARGET_FILE")"; then :; else
     ROOT="$(cd "$(dirname "$TARGET_FILE")" && pwd -P)"
   fi
 fi
 
 rel_from_root() {
-  local full
+  local full r
   full="$(abs_path "$1")"
-  local r="${ROOT%/}/"
+  r="${ROOT%/}/"
   printf '%s\n' "${full#"$r"}"
 }
 
@@ -139,38 +131,59 @@ should_ignore() {
   return 1
 }
 
+# --- ここが重要：CRLF/BOM/空白に強い wikilink 抽出 ---
 extract_wikilinks() {
   local file="$1"
   awk '
+    function strip_bom(s){ sub(/^\357\273\277/, "", s); return s }
+    function trim(s){ gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    function is_fm_delim(s){ return (s ~ /^[ \t]*(---|\.\.\.)[ \t]*$/) }
     function push(x) { if (x != "" && !seen[x]++) print x }
-    BEGIN{in_fm=0}
-    NR==1 && $0=="---" {in_fm=1; next}
-    in_fm==1 && $0=="---" {in_fm=0; next}
-    in_fm { next }
+
+    BEGIN{in_fm=0; firstNonEmptySeen=0}
 
     {
       line=$0
-      while (match(line, /$begin:math:display$\\\[\[\^\]\[\]\+$end:math:display$\]/)) {
-        s = substr(line, RSTART, RLENGTH)
+      sub(/\r$/, "", line)         # CRLF対応
+      line=strip_bom(line)
+      raw=line
+      t=trim(line)
+
+      if (!firstNonEmptySeen) {
+        if (t=="") next
+        firstNonEmptySeen=1
+        if (is_fm_delim(t)) { in_fm=1; next }
+      }
+
+      if (in_fm) {
+        if (is_fm_delim(t)) { in_fm=0; next }
+        next
+      }
+
+      # [[...]] を抽出（コードブロック判定はしない：閉じ忘れ耐性）
+      while (match(raw, /\[\[[^][]+\]\]/)) {
+        s = substr(raw, RSTART, RLENGTH)
 
         # embed ![[...]] は除外
-        if (RSTART > 1 && substr(line, RSTART-1, 1) == "!") {
-          line = substr(line, RSTART+RLENGTH)
+        if (RSTART > 1 && substr(raw, RSTART-1, 1) == "!") {
+          raw = substr(raw, RSTART+RLENGTH)
           continue
         }
 
-        inner = substr(s, 3, length(s)-4)
+        inner = substr(s, 3, length(s)-4)   # [[ ]] を外す
 
+        # alias after |
         p = index(inner, "|")
         if (p > 0) inner = substr(inner, 1, p-1)
 
+        # heading after #
         p = index(inner, "#")
         if (p > 0) inner = substr(inner, 1, p-1)
 
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", inner)
+        inner = trim(inner)
         push(inner)
 
-        line = substr(line, RSTART+RLENGTH)
+        raw = substr(raw, RSTART+RLENGTH)
       }
     }
   ' "$file"
@@ -215,12 +228,12 @@ resolve_link() {
   [[ "$name" != *.md ]] && name="${name}.md"
 
   cand="$(find "$ROOT" \
-      $begin:math:text$ \-path \"\$ROOT\/\.git\" \-o \-path \"\$ROOT\/\.git\/\*\" \\
-         \-o \-path \"\$ROOT\/node\_modules\" \-o \-path \"\$ROOT\/node\_modules\/\*\" \\
-         \-o \-path \"\$ROOT\/\.obsidian\" \-o \-path \"\$ROOT\/\.obsidian\/\*\" \\
-         \-o \-path \"\$ROOT\/dashboards\" \-o \-path \"\$ROOT\/dashboards\/\*\" \\
-         \-o \-path \"\$ROOT\/templates\" \-o \-path \"\$ROOT\/templates\/\*\" \\
-      $end:math:text$ -prune -o \
+      \( -path "$ROOT/.git" -o -path "$ROOT/.git/*" \
+         -o -path "$ROOT/node_modules" -o -path "$ROOT/node_modules/*" \
+         -o -path "$ROOT/.obsidian" -o -path "$ROOT/.obsidian/*" \
+         -o -path "$ROOT/dashboards" -o -path "$ROOT/dashboards/*" \
+         -o -path "$ROOT/templates" -o -path "$ROOT/templates/*" \
+      \) -prune -o \
       -type f -name "$name" -print -quit 2>/dev/null || true)"
 
   if [[ -n "$cand" && -f "$cand" ]]; then
@@ -233,10 +246,7 @@ resolve_link() {
   printf '%s\n' ""
 }
 
-declare -A children
-declare -A unresolved
-declare -A file2wl
-declare -A visited
+declare -A children unresolved file2wl visited
 
 file_to_wikilink() {
   local f="$1"
@@ -252,19 +262,12 @@ file2wl["$ROOT_ABS"]="$ROOT_WL"
 
 populate_children() {
   local f="$1"
-
   [[ -n "${visited[$f]+x}" ]] && return 0
   visited["$f"]=1
 
   local rel
   rel="$(rel_from_root "$f")"
   should_ignore "$rel" && return 0
-
-  if [[ "${DIAG:-0}" == "1" ]]; then
-    local cnt
-    cnt="$(extract_wikilinks "$f" | wc -l | tr -d " ")"
-    echo "[DIAG] $(basename "$f") links=$cnt" >&2
-  fi
 
   local from_dir
   from_dir="$(dirname "$f")"
@@ -306,7 +309,7 @@ print_tree() {
     return 0
   fi
 
-  # unresolved links を先に出す（存在してたら原因が一発で分かる）
+  # 見つからなかったリンクを先に出す
   local u="${unresolved[$f]:-}"
   if [[ -n "$u" ]]; then
     local indentU="" x
@@ -346,7 +349,7 @@ print_tree() {
     printed["$child"]=1
     onpath["$child"]=1
     printf '%s- [[%s]]\n' "$indent" "${file2wl[$child]}"
-    ((++desc_count))   # ★FIX: set -e でも落ちない
+    ((++desc_count))   # ★set -e で落ちない
     print_tree "$child" $((depth+1))
     unset onpath["$child"]
   done
