@@ -1,4 +1,3 @@
-// --- TREE_VIEW ステータス強調設定 ---
 
 // 🎯 Focus: 最優先（深い紺色 + 鮮やかなオレンジのボーダー）
 "(^.*🎯.*$)": {
@@ -7,8 +6,8 @@
   "decorations": [
     {
       "isWholeLine": true,
-      "backgroundColor": "#1a1b26", 
-      "borderColor": "#fab387",
+      "backgroundColor": "#1a261a",
+      "borderColor": "#31fa31",
       "borderStyle": "solid",
       "borderWidth": "0 0 0 4px"
     }
@@ -22,7 +21,7 @@
   "decorations": [
     {
       "isWholeLine": true,
-      "backgroundColor": "#2a1a1a",
+      "backgroundColor": "#170425",
       "borderColor": "#f38ba8",
       "borderStyle": "solid",
       "borderWidth": "0 0 0 4px"
@@ -37,8 +36,8 @@
   "decorations": [
     {
       "isWholeLine": true,
-      "backgroundColor": "#2a241a",
-      "borderColor": "#f9e2af",
+      "backgroundColor": "#390b00",
+      "borderColor": "#ff981b",
       "borderStyle": "solid",
       "borderWidth": "0 0 0 4px"
     }
@@ -52,7 +51,7 @@
   "decorations": [
     {
       "isWholeLine": true,
-      "backgroundColor": "#311b1b",
+      "backgroundColor": "#140d0d",
       "borderColor": "#eba0ac",
       "borderStyle": "solid",
       "borderWidth": "0 0 0 8px"
@@ -74,4 +73,4 @@
       "borderWidth": "0 0 0 2px"
     }
   ]
-}
+},
