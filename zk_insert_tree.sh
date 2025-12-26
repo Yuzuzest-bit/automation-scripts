@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ---- debug (落ちた場所を表示) ----
+DEBUG="${DEBUG:-0}"
+if [[ "$DEBUG" == "1" ]]; then
+  set -x
+fi
+trap 'ec=$?; echo "[ERR] exit=$ec line=$LINENO cmd=$BASH_COMMAND" >&2' ERR
+
 # =========================
 # Defaults: 引数最小
 # =========================
