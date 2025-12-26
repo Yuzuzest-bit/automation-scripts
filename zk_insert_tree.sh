@@ -1,36 +1,31 @@
 #!/usr/bin/env bash
 # zk_insert_wikilink_tree.sh
 #
-# 目的:
-# - 「今開いているノート」を起点に、本文中の [[wikilink]]（前向きリンク）を辿ってツリーを生成し、
-#   そのツリーをノート内に挿入/更新する。
+# 「今開いているノート」を起点に、本文中の [[wikilink]]（前向きリンク）を辿ってツリーを生成し、
+# ノート内に挿入/更新する。
 #
-# 特徴:
-# - id/parent に依存しない（崩れていてもOK）
+# - id/parent に依存しない
 # - rg 不要
-# - Vaultルートは「開いているノートから上へ辿って .obsidian を探す」ことで自動検出
-#   （見つからなければファイルのあるディレクトリをROOTとして扱う）
-# - 循環参照は 🔁 (cycle) を表示してその枝の探索を中断
-# - [[...]] 抽出は「コードブロック判定なし」版（``` の閉じ忘れでも吸い込まれない）
+# - Vault root は .obsidian を目印に自動検出（無ければファイルのあるフォルダ）
+# - 循環参照は 🔁 (cycle) で枝を中断
+# - [[...]] 抽出はコードブロック判定なし（``` 閉じ忘れでも吸い込まれない）
+# - 「見つからなかったリンク」も ⚠️ (not found) で出す（原因が一発で見える）
 #
 # 使い方:
 #   ./zk_insert_wikilink_tree.sh <current.md>
-#   オプション:
-#     --root ROOT        ... ROOTを明示（自動検出より優先）
-#     --max-depth N      ... 0=無制限（デフォルト）
-#     --title "## Tree"  ... 見出し
+# オプション:
+#   --root ROOT
+#   --max-depth N   (0=無制限)
+#   --title "## Tree"
 #
 # 診断:
-#   DIAG=1 を付けると、各ノートの抽出リンク数だけを出す（ログ地獄になりにくい）
+#   DIAG=1 を付けると各ノートの抽出リンク数だけ出す
 #     DIAG=1 ./zk_insert_wikilink_tree.sh xxx.md
 
 set -Eeuo pipefail
 trap 'ec=$?; echo "[ERR] exit=$ec line=$LINENO file=${BASH_SOURCE[0]} cmd=$BASH_COMMAND" >&2' ERR
 
-# =========================
-# Defaults (引数最小)
-# =========================
-MAX_DEPTH=0                      # 0 = 無制限
+MAX_DEPTH=0
 SECTION_TITLE="## Tree"
 MARK_BEGIN="<!--TREE:BEGIN-->"
 MARK_END="<!--TREE:END-->"
@@ -39,17 +34,10 @@ IGNORE_FILE=".dashboardignore"
 usage() {
   cat >&2 <<'EOF'
 usage: zk_insert_wikilink_tree.sh <current.md> [--root ROOT] [--max-depth N] [--title "## Tree"]
-
-- current.md を起点に、本文中の [[wikilink]] を辿ってツリーを生成して挿入
-- rg 不要
-- Vault root は .obsidian を目印に自動検出（--root 指定があればそれを優先）
 EOF
   exit 2
 }
 
-# =========================
-# Path helpers (Git Bash対応)
-# =========================
 to_posix() {
   local p="$1"
   if command -v cygpath >/dev/null 2>&1; then
@@ -76,9 +64,6 @@ abs_path() {
 
 strip_md() { local p="$1"; printf '%s\n' "${p%.md}"; }
 
-# =========================
-# Vault root auto-detect (.obsidian)
-# =========================
 detect_vault_root() {
   local start="$1"
   local d
@@ -95,14 +80,11 @@ detect_vault_root() {
   done
 }
 
-# =========================
-# Args
-# =========================
 TARGET_FILE="${1:-}"
 [[ -z "$TARGET_FILE" ]] && usage
 shift || true
 
-ROOT=""  # 未指定なら後で自動検出
+ROOT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -117,14 +99,12 @@ done
 TARGET_FILE="$(abs_path "$TARGET_FILE")"
 [[ -f "$TARGET_FILE" ]] || { echo "[ERR] File not found: $TARGET_FILE" >&2; exit 1; }
 
-# ROOT を決定（指定があればそれ、無ければ自動検出）
 if [[ -n "${ROOT}" ]]; then
   ROOT="$(abs_path "$ROOT")"
 else
   if ROOT="$(detect_vault_root "$TARGET_FILE")"; then
     :
   else
-    # 最後の保険：ノートと同じフォルダをROOTとして扱う
     ROOT="$(cd "$(dirname "$TARGET_FILE")" && pwd -P)"
   fi
 fi
@@ -136,9 +116,6 @@ rel_from_root() {
   printf '%s\n' "${full#"$r"}"
 }
 
-# =========================
-# Ignore (ROOT/.dashboardignore + 主要フォルダ除外)
-# =========================
 should_ignore() {
   local rel="$1"
   case "$rel" in
@@ -162,14 +139,6 @@ should_ignore() {
   return 1
 }
 
-# =========================
-# Extract wikilinks
-# - frontmatter(--- ---) は除外
-# - コードブロック判定はしない（``` 閉じ忘れに強い）
-# - ![[embed]] は除外
-# - [[path|alias]] の alias は捨てる
-# - [[note#heading]] の heading は捨てる
-# =========================
 extract_wikilinks() {
   local file="$1"
   awk '
@@ -181,7 +150,7 @@ extract_wikilinks() {
 
     {
       line=$0
-      while (match(line, /\[\[[^][]+\]\]/)) {
+      while (match(line, /$begin:math:display$\\\[\[\^\]\[\]\+$end:math:display$\]/)) {
         s = substr(line, RSTART, RLENGTH)
 
         # embed ![[...]] は除外
@@ -207,14 +176,7 @@ extract_wikilinks() {
   ' "$file"
 }
 
-# =========================
-# Resolve link -> file
-# 優先順位:
-# 1) [[path/to/note]] は ROOT 基準で解決
-# 2) [[name]] は 同フォルダ
-# 3) それでも無ければ ROOT からファイル名検索（最初に見つかったもの）
-# =========================
-declare -A RESOLVE_CACHE  # key=fromDir|link -> absfile or ""
+declare -A RESOLVE_CACHE
 
 resolve_link() {
   local link="$1"
@@ -253,12 +215,12 @@ resolve_link() {
   [[ "$name" != *.md ]] && name="${name}.md"
 
   cand="$(find "$ROOT" \
-      \( -path "$ROOT/.git" -o -path "$ROOT/.git/*" \
-         -o -path "$ROOT/node_modules" -o -path "$ROOT/node_modules/*" \
-         -o -path "$ROOT/.obsidian" -o -path "$ROOT/.obsidian/*" \
-         -o -path "$ROOT/dashboards" -o -path "$ROOT/dashboards/*" \
-         -o -path "$ROOT/templates" -o -path "$ROOT/templates/*" \
-      \) -prune -o \
+      $begin:math:text$ \-path \"\$ROOT\/\.git\" \-o \-path \"\$ROOT\/\.git\/\*\" \\
+         \-o \-path \"\$ROOT\/node\_modules\" \-o \-path \"\$ROOT\/node\_modules\/\*\" \\
+         \-o \-path \"\$ROOT\/\.obsidian\" \-o \-path \"\$ROOT\/\.obsidian\/\*\" \\
+         \-o \-path \"\$ROOT\/dashboards\" \-o \-path \"\$ROOT\/dashboards\/\*\" \\
+         \-o \-path \"\$ROOT\/templates\" \-o \-path \"\$ROOT\/templates\/\*\" \\
+      $end:math:text$ -prune -o \
       -type f -name "$name" -print -quit 2>/dev/null || true)"
 
   if [[ -n "$cand" && -f "$cand" ]]; then
@@ -271,12 +233,10 @@ resolve_link() {
   printf '%s\n' ""
 }
 
-# =========================
-# Build subtree by outgoing links only
-# =========================
-declare -A children  # absfile -> list of absfile (newline)
-declare -A file2wl   # absfile -> wikilink text (path/from/root without .md)
-declare -A visited   # absfile -> 1
+declare -A children
+declare -A unresolved
+declare -A file2wl
+declare -A visited
 
 file_to_wikilink() {
   local f="$1"
@@ -300,7 +260,6 @@ populate_children() {
   rel="$(rel_from_root "$f")"
   should_ignore "$rel" && return 0
 
-  # diag: extracted link count only (quiet)
   if [[ "${DIAG:-0}" == "1" ]]; then
     local cnt
     cnt="$(extract_wikilinks "$f" | wc -l | tr -d " ")"
@@ -314,7 +273,10 @@ populate_children() {
     [[ -z "$lk" ]] && continue
     local child
     child="$(resolve_link "$lk" "$from_dir")"
-    [[ -z "$child" ]] && continue
+    if [[ -z "$child" ]]; then
+      unresolved["$f"]+="$lk"$'\n'
+      continue
+    fi
 
     local child_rel
     child_rel="$(rel_from_root "$child")"
@@ -330,9 +292,6 @@ populate_children() {
 
 populate_children "$ROOT_ABS"
 
-# =========================
-# Print tree with cycle stop
-# =========================
 TREE_MD="$(mktemp)"
 OUT_TMP="$(mktemp)"
 trap 'rm -f "$TREE_MD" "$OUT_TMP" 2>/dev/null || true' EXIT
@@ -345,6 +304,17 @@ print_tree() {
 
   if (( MAX_DEPTH > 0 && depth > MAX_DEPTH )); then
     return 0
+  fi
+
+  # unresolved links を先に出す（存在してたら原因が一発で分かる）
+  local u="${unresolved[$f]:-}"
+  if [[ -n "$u" ]]; then
+    local indentU="" x
+    for ((i=0;i<depth;i++)); do indentU+="  "; done
+    while IFS= read -r x; do
+      [[ -z "$x" ]] && continue
+      printf '%s- [[%s]] ⚠️ (not found)\n' "$indentU" "$x"
+    done <<< "$u"
   fi
 
   local list="${children[$f]:-}"
@@ -376,7 +346,7 @@ print_tree() {
     printed["$child"]=1
     onpath["$child"]=1
     printf '%s- [[%s]]\n' "$indent" "${file2wl[$child]}"
-    ((desc_count++))
+    ((++desc_count))   # ★FIX: set -e でも落ちない
     print_tree "$child" $((depth+1))
     unset onpath["$child"]
   done
@@ -392,9 +362,6 @@ print_tree() {
   echo "> descendants: $desc_count"
 } > "$TREE_MD"
 
-# =========================
-# Insert / Replace block
-# =========================
 if grep -qF "$MARK_BEGIN" "$TARGET_FILE" && grep -qF "$MARK_END" "$TARGET_FILE"; then
   awk -v b="$MARK_BEGIN" -v e="$MARK_END" -v tf="$TREE_MD" '
     function dump_tree(   l) { while ((getline l < tf) > 0) print l; close(tf) }
