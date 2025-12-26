@@ -2,36 +2,48 @@
 // --- Highlight (fabiospampinato.vscode-highlight) ---
 "highlight.regexFlags": "gim", // ^ を使うので m 必須  [oai_citation:1‡GitHub](https://github.com/fabiospampinato/vscode-highlight)
 "highlight.regexes": {
-  // H1
-  "(^#\\s)(.*$)": {
-    "filterLanguageRegex": "markdown",
-    "decorations": [
-      { "color": "#6c7086" }, // 記号(# )は薄く
-      {
-        "color": "#f38ba8", "fontWeight": "bold",
-        "borderWidth": "0 0 2px 0", "borderStyle": "solid", "borderColor": "#f38ba8"
-      }
-    ]
-  },
+// H1: # 見出し（行全体に薄い帯＋左ボーダー）
+"(^[ \\t]{0,3}#(?!#)\\s+.*$)": {
+  "filterLanguageRegex": "markdown|mdx",
+  "regexFlags": "gm",
+  "decorations": [
+    {
+      "isWholeLine": true,
+      "backgroundColor": "#0b1024",
+      "borderColor": "#f38ba8",
+      "borderStyle": "solid",
+      "borderWidth": "0 0 0 2px"
+    }
+  ]
+},
 
-  // H2
-  "(^##\\s)(.*$)": {
-    "filterLanguageRegex": "markdown",
-    "decorations": [
-      { "color": "#6c7086" },
-      {
-        "color": "#89b4fa", "fontWeight": "bold",
-        "borderWidth": "0 0 1px 0", "borderStyle": "solid", "borderColor": "#89b4fa"
-      }
-    ]
-  },
+// H2: ##
+"(^[ \\t]{0,3}##(?!#)\\s+.*$)": {
+  "filterLanguageRegex": "markdown|mdx",
+  "regexFlags": "gm",
+  "decorations": [
+    {
+      "isWholeLine": true,
+"backgroundColor": "#111f3d",
+"borderColor": "#89b4fa",
+      "borderStyle": "solid",
+      "borderWidth": "0 0 0 4px"
+    }
+  ]
+},
 
-  // H3
-  "(^###\\s)(.*$)": {
-    "filterLanguageRegex": "markdown",
-    "decorations": [
-      { "color": "#6c7086" },
-      { "color": "#a6e3a1", "fontWeight": "bold" }
-    ]
-  }
+// H3: ###
+"(^[ \\t]{0,3}###(?!#)\\s+.*$)": {
+  "filterLanguageRegex": "markdown|mdx",
+  "regexFlags": "gm",
+  "decorations": [
+    {
+      "isWholeLine": true,
+"backgroundColor": "#162a57",
+"borderColor": "#a6e3a1",
+      "borderStyle": "solid",
+      "borderWidth": "0 0 0 6px"
+    }
+  ]
+},
 }
