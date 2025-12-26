@@ -11,13 +11,18 @@
 # - Vaultルートは「開いているノートから上へ辿って .obsidian を探す」ことで自動検出
 #   （見つからなければファイルのあるディレクトリをROOTとして扱う）
 # - 循環参照は 🔁 (cycle) を表示してその枝の探索を中断
+# - [[...]] 抽出は「コードブロック判定なし」版（``` の閉じ忘れでも吸い込まれない）
 #
 # 使い方:
 #   ./zk_insert_wikilink_tree.sh <current.md>
-#   追加オプションも一応あり:
-#     --root ROOT        ... ROOTを明示したい場合（自動検出より優先）
+#   オプション:
+#     --root ROOT        ... ROOTを明示（自動検出より優先）
 #     --max-depth N      ... 0=無制限（デフォルト）
 #     --title "## Tree"  ... 見出し
+#
+# 診断:
+#   DIAG=1 を付けると、各ノートの抽出リンク数だけを出す（ログ地獄になりにくい）
+#     DIAG=1 ./zk_insert_wikilink_tree.sh xxx.md
 
 set -Eeuo pipefail
 trap 'ec=$?; echo "[ERR] exit=$ec line=$LINENO file=${BASH_SOURCE[0]} cmd=$BASH_COMMAND" >&2' ERR
@@ -158,42 +163,44 @@ should_ignore() {
 }
 
 # =========================
-# Extract wikilinks (frontmatter / code fence 除外、embed除外)
+# Extract wikilinks
+# - frontmatter(--- ---) は除外
+# - コードブロック判定はしない（``` 閉じ忘れに強い）
+# - ![[embed]] は除外
+# - [[path|alias]] の alias は捨てる
+# - [[note#heading]] の heading は捨てる
 # =========================
 extract_wikilinks() {
   local file="$1"
   awk '
     function push(x) { if (x != "" && !seen[x]++) print x }
-    BEGIN{in_fm=0; in_code=0}
+    BEGIN{in_fm=0}
     NR==1 && $0=="---" {in_fm=1; next}
     in_fm==1 && $0=="---" {in_fm=0; next}
-
-    /^[[:space:]]*```/ { in_code = !in_code; next }
-    /^[[:space:]]*~~~/ { in_code = !in_code; next }
-
-    (in_fm||in_code) { next }
+    in_fm { next }
 
     {
       line=$0
-      while (match(line, /$begin:math:display$\\\[\[\^\]\[\]\+$end:math:display$\]/)) {
+      while (match(line, /\[\[[^][]+\]\]/)) {
         s = substr(line, RSTART, RLENGTH)
+
         # embed ![[...]] は除外
         if (RSTART > 1 && substr(line, RSTART-1, 1) == "!") {
           line = substr(line, RSTART+RLENGTH)
           continue
         }
-        inner = substr(s, 3, length(s)-4)   # [[ ]] を外す
 
-        # alias after |
+        inner = substr(s, 3, length(s)-4)
+
         p = index(inner, "|")
         if (p > 0) inner = substr(inner, 1, p-1)
 
-        # heading after #
         p = index(inner, "#")
         if (p > 0) inner = substr(inner, 1, p-1)
 
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", inner)
         push(inner)
+
         line = substr(line, RSTART+RLENGTH)
       }
     }
@@ -246,12 +253,12 @@ resolve_link() {
   [[ "$name" != *.md ]] && name="${name}.md"
 
   cand="$(find "$ROOT" \
-      $begin:math:text$ \-path \"\$ROOT\/\.git\" \-o \-path \"\$ROOT\/\.git\/\*\" \\
-         \-o \-path \"\$ROOT\/node\_modules\" \-o \-path \"\$ROOT\/node\_modules\/\*\" \\
-         \-o \-path \"\$ROOT\/\.obsidian\" \-o \-path \"\$ROOT\/\.obsidian\/\*\" \\
-         \-o \-path \"\$ROOT\/dashboards\" \-o \-path \"\$ROOT\/dashboards\/\*\" \\
-         \-o \-path \"\$ROOT\/templates\" \-o \-path \"\$ROOT\/templates\/\*\" \\
-      $end:math:text$ -prune -o \
+      \( -path "$ROOT/.git" -o -path "$ROOT/.git/*" \
+         -o -path "$ROOT/node_modules" -o -path "$ROOT/node_modules/*" \
+         -o -path "$ROOT/.obsidian" -o -path "$ROOT/.obsidian/*" \
+         -o -path "$ROOT/dashboards" -o -path "$ROOT/dashboards/*" \
+         -o -path "$ROOT/templates" -o -path "$ROOT/templates/*" \
+      \) -prune -o \
       -type f -name "$name" -print -quit 2>/dev/null || true)"
 
   if [[ -n "$cand" && -f "$cand" ]]; then
@@ -292,6 +299,13 @@ populate_children() {
   local rel
   rel="$(rel_from_root "$f")"
   should_ignore "$rel" && return 0
+
+  # diag: extracted link count only (quiet)
+  if [[ "${DIAG:-0}" == "1" ]]; then
+    local cnt
+    cnt="$(extract_wikilinks "$f" | wc -l | tr -d " ")"
+    echo "[DIAG] $(basename "$f") links=$cnt" >&2
+  fi
 
   local from_dir
   from_dir="$(dirname "$f")"
