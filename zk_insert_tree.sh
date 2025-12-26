@@ -1,19 +1,31 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# zk_insert_wikilink_tree.sh
+#
+# 目的:
+# - 「今開いているノート」を起点に、本文中の [[wikilink]]（前向きリンク）を辿ってツリーを生成し、
+#   そのツリーをノート内に挿入/更新する。
+#
+# 特徴:
+# - id/parent に依存しない（崩れていてもOK）
+# - rg 不要
+# - Vaultルートは「開いているノートから上へ辿って .obsidian を探す」ことで自動検出
+#   （見つからなければファイルのあるディレクトリをROOTとして扱う）
+# - 循環参照は 🔁 (cycle) を表示してその枝の探索を中断
+#
+# 使い方:
+#   ./zk_insert_wikilink_tree.sh <current.md>
+#   追加オプションも一応あり:
+#     --root ROOT        ... ROOTを明示したい場合（自動検出より優先）
+#     --max-depth N      ... 0=無制限（デフォルト）
+#     --title "## Tree"  ... 見出し
 
-# ---- debug (落ちた場所を表示) ----
-DEBUG="${DEBUG:-0}"
-if [[ "$DEBUG" == "1" ]]; then
-  set -x
-fi
-trap 'ec=$?; echo "[ERR] exit=$ec line=$LINENO cmd=$BASH_COMMAND" >&2' ERR
+set -Eeuo pipefail
+trap 'ec=$?; echo "[ERR] exit=$ec line=$LINENO file=${BASH_SOURCE[0]} cmd=$BASH_COMMAND" >&2' ERR
 
 # =========================
-# Defaults: 引数最小
+# Defaults (引数最小)
 # =========================
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-ROOT="${ZK_ROOT:-$SCRIPT_DIR}"   # ← Vaultルートは「スクリプトがあるフォルダ」
-MAX_DEPTH=0                      # ← 0 = 無制限
+MAX_DEPTH=0                      # 0 = 無制限
 SECTION_TITLE="## Tree"
 MARK_BEGIN="<!--TREE:BEGIN-->"
 MARK_END="<!--TREE:END-->"
@@ -23,26 +35,12 @@ usage() {
   cat >&2 <<'EOF'
 usage: zk_insert_wikilink_tree.sh <current.md> [--root ROOT] [--max-depth N] [--title "## Tree"]
 
-- current.md を起点に、本文中の [[wikilink]] を辿って「前向きリンクのツリー」を生成して挿入
-- 循環参照は 🔁 (cycle) を表示してその枝を中断
+- current.md を起点に、本文中の [[wikilink]] を辿ってツリーを生成して挿入
 - rg 不要
+- Vault root は .obsidian を目印に自動検出（--root 指定があればそれを優先）
 EOF
   exit 2
 }
-
-TARGET_FILE="${1:-}"
-[[ -z "$TARGET_FILE" ]] && usage
-shift || true
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --root) ROOT="${2:-}"; shift 2;;
-    --max-depth) MAX_DEPTH="${2:-0}"; shift 2;;
-    --title) SECTION_TITLE="${2:-## Tree}"; shift 2;;
-    -h|--help) usage;;
-    *) shift 1;;
-  esac
-done
 
 # =========================
 # Path helpers (Git Bash対応)
@@ -71,15 +69,60 @@ abs_path() {
   fi
 }
 
-ROOT="$(abs_path "$ROOT")"
-TARGET_FILE="$(abs_path "$TARGET_FILE")"
-
-if [[ ! -f "$TARGET_FILE" ]]; then
-  echo "[ERR] File not found: $TARGET_FILE" >&2
-  exit 1
-fi
-
 strip_md() { local p="$1"; printf '%s\n' "${p%.md}"; }
+
+# =========================
+# Vault root auto-detect (.obsidian)
+# =========================
+detect_vault_root() {
+  local start="$1"
+  local d
+  d="$(cd "$(dirname "$start")" && pwd -P)"
+  while :; do
+    if [[ -d "$d/.obsidian" ]]; then
+      printf '%s\n' "$d"
+      return 0
+    fi
+    if [[ "$d" == "/" ]]; then
+      return 1
+    fi
+    d="$(cd "$d/.." && pwd -P)"
+  done
+}
+
+# =========================
+# Args
+# =========================
+TARGET_FILE="${1:-}"
+[[ -z "$TARGET_FILE" ]] && usage
+shift || true
+
+ROOT=""  # 未指定なら後で自動検出
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --root) ROOT="${2:-}"; shift 2;;
+    --max-depth) MAX_DEPTH="${2:-0}"; shift 2;;
+    --title) SECTION_TITLE="${2:-## Tree}"; shift 2;;
+    -h|--help) usage;;
+    *) shift 1;;
+  esac
+done
+
+TARGET_FILE="$(abs_path "$TARGET_FILE")"
+[[ -f "$TARGET_FILE" ]] || { echo "[ERR] File not found: $TARGET_FILE" >&2; exit 1; }
+
+# ROOT を決定（指定があればそれ、無ければ自動検出）
+if [[ -n "${ROOT}" ]]; then
+  ROOT="$(abs_path "$ROOT")"
+else
+  if ROOT="$(detect_vault_root "$TARGET_FILE")"; then
+    :
+  else
+    # 最後の保険：ノートと同じフォルダをROOTとして扱う
+    ROOT="$(cd "$(dirname "$TARGET_FILE")" && pwd -P)"
+  fi
+fi
 
 rel_from_root() {
   local full
@@ -89,7 +132,7 @@ rel_from_root() {
 }
 
 # =========================
-# Ignore
+# Ignore (ROOT/.dashboardignore + 主要フォルダ除外)
 # =========================
 should_ignore() {
   local rel="$1"
@@ -115,11 +158,7 @@ should_ignore() {
 }
 
 # =========================
-# Extract wikilinks from a file (frontmatter / code fence 除外)
-# - [[file]]
-# - [[path/to/file|alias]]
-# - [[file#heading]] などは file 部分だけ使う
-# - ![[embed]] は除外
+# Extract wikilinks (frontmatter / code fence 除外、embed除外)
 # =========================
 extract_wikilinks() {
   local file="$1"
@@ -129,7 +168,6 @@ extract_wikilinks() {
     NR==1 && $0=="---" {in_fm=1; next}
     in_fm==1 && $0=="---" {in_fm=0; next}
 
-    # code fence toggle (``` or ~~~)
     /^[[:space:]]*```/ { in_code = !in_code; next }
     /^[[:space:]]*~~~/ { in_code = !in_code; next }
 
@@ -137,21 +175,23 @@ extract_wikilinks() {
 
     {
       line=$0
-      # find [[...]] repeatedly
-      while (match(line, /\[\[[^][]+\]\]/)) {
+      while (match(line, /$begin:math:display$\\\[\[\^\]\[\]\+$end:math:display$\]/)) {
         s = substr(line, RSTART, RLENGTH)
-        # skip embed: if char before [[ is !
+        # embed ![[...]] は除外
         if (RSTART > 1 && substr(line, RSTART-1, 1) == "!") {
           line = substr(line, RSTART+RLENGTH)
           continue
         }
-        inner = substr(s, 3, length(s)-4)   # remove [[ ]]
-        # drop alias after |
+        inner = substr(s, 3, length(s)-4)   # [[ ]] を外す
+
+        # alias after |
         p = index(inner, "|")
         if (p > 0) inner = substr(inner, 1, p-1)
-        # drop heading/block after #
+
+        # heading after #
         p = index(inner, "#")
         if (p > 0) inner = substr(inner, 1, p-1)
+
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", inner)
         push(inner)
         line = substr(line, RSTART+RLENGTH)
@@ -161,9 +201,11 @@ extract_wikilinks() {
 }
 
 # =========================
-# Resolve a wikilink to a file
-# - path/to/name  -> ROOT/path/to/name(.md)
-# - name          -> まず同フォルダ、無ければ Vault 内を find（最初に見つかったもの）
+# Resolve link -> file
+# 優先順位:
+# 1) [[path/to/note]] は ROOT 基準で解決
+# 2) [[name]] は 同フォルダ
+# 3) それでも無ければ ROOT からファイル名検索（最初に見つかったもの）
 # =========================
 declare -A RESOLVE_CACHE  # key=fromDir|link -> absfile or ""
 
@@ -179,38 +221,37 @@ resolve_link() {
 
   local cand=""
 
-  # 1) link にスラッシュがあるなら ROOT 基準で解決
+  # 1) path付きはROOT基準
   if [[ "$link" == */* ]]; then
     cand="$ROOT/$link"
     [[ "$cand" != *.md ]] && cand="${cand}.md"
     if [[ -f "$cand" ]]; then
-      RESOLVE_CACHE["$key"]="$cand"
-      printf '%s\n' "$cand"
+      RESOLVE_CACHE["$key"]="$(abs_path "$cand")"
+      printf '%s\n' "${RESOLVE_CACHE[$key]}"
       return 0
     fi
   fi
 
-  # 2) 同フォルダを最優先
+  # 2) 同フォルダ優先
   cand="$from_dir/$link"
   [[ "$cand" != *.md ]] && cand="${cand}.md"
   if [[ -f "$cand" ]]; then
-    RESOLVE_CACHE["$key"]="$cand"
-    printf '%s\n' "$cand"
+    RESOLVE_CACHE["$key"]="$(abs_path "$cand")"
+    printf '%s\n' "${RESOLVE_CACHE[$key]}"
     return 0
   fi
 
-  # 3) Vault 内をファイル名で探索（重いが “必要なときだけ”）
+  # 3) ROOT全体から探索（必要な時だけ）
   local name="$link"
   [[ "$name" != *.md ]] && name="${name}.md"
 
-  # pruneで少し軽くする
   cand="$(find "$ROOT" \
-      \( -path "$ROOT/.git" -o -path "$ROOT/.git/*" \
-         -o -path "$ROOT/node_modules" -o -path "$ROOT/node_modules/*" \
-         -o -path "$ROOT/.obsidian" -o -path "$ROOT/.obsidian/*" \
-         -o -path "$ROOT/dashboards" -o -path "$ROOT/dashboards/*" \
-         -o -path "$ROOT/templates" -o -path "$ROOT/templates/*" \
-      \) -prune -o \
+      $begin:math:text$ \-path \"\$ROOT\/\.git\" \-o \-path \"\$ROOT\/\.git\/\*\" \\
+         \-o \-path \"\$ROOT\/node\_modules\" \-o \-path \"\$ROOT\/node\_modules\/\*\" \\
+         \-o \-path \"\$ROOT\/\.obsidian\" \-o \-path \"\$ROOT\/\.obsidian\/\*\" \\
+         \-o \-path \"\$ROOT\/dashboards\" \-o \-path \"\$ROOT\/dashboards\/\*\" \\
+         \-o \-path \"\$ROOT\/templates\" \-o \-path \"\$ROOT\/templates\/\*\" \\
+      $end:math:text$ -prune -o \
       -type f -name "$name" -print -quit 2>/dev/null || true)"
 
   if [[ -n "$cand" && -f "$cand" ]]; then
@@ -227,9 +268,8 @@ resolve_link() {
 # Build subtree by outgoing links only
 # =========================
 declare -A children  # absfile -> list of absfile (newline)
-declare -A file2link # absfile -> [[path/from/root without .md]]
+declare -A file2wl   # absfile -> wikilink text (path/from/root without .md)
 declare -A visited   # absfile -> 1
-declare -A onpath    # absfile -> 1
 
 file_to_wikilink() {
   local f="$1"
@@ -241,9 +281,8 @@ file_to_wikilink() {
 
 ROOT_ABS="$TARGET_FILE"
 ROOT_WL="$(file_to_wikilink "$ROOT_ABS")"
-file2link["$ROOT_ABS"]="$ROOT_WL"
+file2wl["$ROOT_ABS"]="$ROOT_WL"
 
-# DFS: populate children lists lazily
 populate_children() {
   local f="$1"
 
@@ -268,8 +307,8 @@ populate_children() {
     should_ignore "$child_rel" && continue
 
     children["$f"]+="$child"$'\n'
-    if [[ -z "${file2link[$child]:-}" ]]; then
-      file2link["$child"]="$(file_to_wikilink "$child")"
+    if [[ -z "${file2wl[$child]:-}" ]]; then
+      file2wl["$child"]="$(file_to_wikilink "$child")"
     fi
     populate_children "$child"
   done < <(extract_wikilinks "$f")
@@ -284,7 +323,7 @@ TREE_MD="$(mktemp)"
 OUT_TMP="$(mktemp)"
 trap 'rm -f "$TREE_MD" "$OUT_TMP" 2>/dev/null || true' EXIT
 
-declare -A printed
+declare -A onpath printed
 desc_count=0
 
 print_tree() {
@@ -297,12 +336,11 @@ print_tree() {
   local list="${children[$f]:-}"
   [[ -z "$list" ]] && return 0
 
-  # stable sort by wikilink
   mapfile -t kids < <(
     printf '%s' "$list" |
       awk 'NF' | awk '!seen[$0]++' |
       while read -r c; do
-        printf '%s\t%s\n' "${file2link[$c]}" "$c"
+        printf '%s\t%s\n' "${file2wl[$c]}" "$c"
       done | sort | awk -F'\t' '{print $2}'
   )
 
@@ -313,17 +351,17 @@ print_tree() {
     [[ -z "$child" ]] && continue
 
     if [[ -n "${onpath[$child]+x}" ]]; then
-      printf '%s- [[%s]] 🔁 (cycle)\n' "$indent" "${file2link[$child]}"
+      printf '%s- [[%s]] 🔁 (cycle)\n' "$indent" "${file2wl[$child]}"
       continue
     fi
     if [[ -n "${printed[$child]+x}" ]]; then
-      printf '%s- [[%s]] ↩︎ (already shown)\n' "$indent" "${file2link[$child]}"
+      printf '%s- [[%s]] ↩︎ (already shown)\n' "$indent" "${file2wl[$child]}"
       continue
     fi
 
     printed["$child"]=1
     onpath["$child"]=1
-    printf '%s- [[%s]]\n' "$indent" "${file2link[$child]}"
+    printf '%s- [[%s]]\n' "$indent" "${file2wl[$child]}"
     ((desc_count++))
     print_tree "$child" $((depth+1))
     unset onpath["$child"]
