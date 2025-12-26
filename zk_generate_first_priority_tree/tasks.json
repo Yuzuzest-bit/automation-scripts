@@ -1,0 +1,10 @@
+    {
+      "label": "insert Tree",
+      "type": "shell",
+      "command": "/opt/homebrew/bin/bash",
+      "args": [
+        "${workspaceFolder}/zk_generate_status_tree.sh",
+        "${file}"
+      ],
+      "problemMatcher": []
+    },
