@@ -1,37 +1,52 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# --------------------------------------------
-# Defaults
-# --------------------------------------------
+# ============================================================
+# Defaults (なるべく引数なしで動く)
+# ============================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-ROOT="${ZK_ROOT:-$SCRIPT_DIR}"   # ← デフォルトは「このスクリプトがあるフォルダ」
-MAX_DEPTH=0                      # ← 0 = 無制限
+ROOT="${ZK_ROOT:-$SCRIPT_DIR}"      # ← デフォルトは「このスクリプトがあるフォルダ」
+MAX_DEPTH=0                         # ← 0 = 無制限
 SECTION_TITLE="## Tree"
 MARK_BEGIN="<!--TREE:BEGIN-->"
 MARK_END="<!--TREE:END-->"
 IGNORE_FILE=".dashboardignore"
 
+CACHE_DIR="$ROOT/.zk_cache"
+CACHE_INDEX="$CACHE_DIR/parent_index.tsv"
+CACHE_STAMP="$CACHE_DIR/parent_index.stamp"
+
 usage() {
   cat >&2 <<'EOF'
-usage: zk_insert_tree.sh <current.md> [options]
+usage: zk_insert_tree.sh <current.md> [--root ROOT] [--max-depth N] [--title "## Tree"]
 
-options:
-  --root ROOT          (default: script folder)
-  --max-depth N        (default: unlimited; 0 means unlimited)
-  --title "## Tree"    (default: ## Tree)
-
-notes:
-- current.md を起点に parent: を辿って「そのサブツリーだけ」出力
-- 循環参照は "🔁 (cycle)" と表示してその枝の探索を中断
-- ripgrep (rg) が必要
+defaults:
+  --root      = script folder
+  --max-depth = unlimited (0)
 EOF
   exit 2
 }
 
-# --------------------------------------------
-# Helpers (path)
-# --------------------------------------------
+# ============================================================
+# Args
+# ============================================================
+TARGET_FILE="${1:-}"
+[[ -z "$TARGET_FILE" ]] && usage
+shift || true
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --root) ROOT="${2:-}"; shift 2;;
+    --max-depth) MAX_DEPTH="${2:-0}"; shift 2;;
+    --title) SECTION_TITLE="${2:-## Tree}"; shift 2;;
+    -h|--help) usage;;
+    *) shift 1;;
+  esac
+done
+
+# ============================================================
+# Path helpers (Git Bash / Windows対応)
+# ============================================================
 to_posix() {
   local p="$1"
   if command -v cygpath >/dev/null 2>&1; then
@@ -56,55 +71,26 @@ abs_path() {
   fi
 }
 
-strip_md() {
-  local p="$1"
-  p="${p%.md}"
-  printf '%s\n' "$p"
-}
-
-rel_from_root() {
-  local full="$1"
-  full="$(abs_path "$full")"
-  local r
-  r="$(abs_path "$ROOT")"
-  r="${r%/}/"
-  full="${full#"$r"}"
-  printf '%s\n' "$full"
-}
-
-# --------------------------------------------
-# Parse args
-# --------------------------------------------
-TARGET_FILE="${1:-}"
-[[ -z "$TARGET_FILE" ]] && usage
-shift || true
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --root) ROOT="${2:-}"; shift 2;;
-    --max-depth) MAX_DEPTH="${2:-0}"; shift 2;;
-    --title) SECTION_TITLE="${2:-## Tree}"; shift 2;;
-    -h|--help) usage;;
-    *) shift 1;;
-  esac
-done
-
-TARGET_FILE="$(abs_path "$TARGET_FILE")"
 ROOT="$(abs_path "$ROOT")"
+TARGET_FILE="$(abs_path "$TARGET_FILE")"
 
 if [[ ! -f "$TARGET_FILE" ]]; then
   echo "[ERR] File not found: $TARGET_FILE" >&2
   exit 1
 fi
 
-if ! command -v rg >/dev/null 2>&1; then
-  echo "[ERR] rg (ripgrep) not found. This fast subtree mode requires rg." >&2
-  exit 2
-fi
+strip_md() { local p="$1"; printf '%s\n' "${p%.md}"; }
 
-# --------------------------------------------
-# Frontmatter read
-# --------------------------------------------
+rel_from_root() {
+  local full
+  full="$(abs_path "$1")"
+  local r="${ROOT%/}/"
+  printf '%s\n' "${full#"$r"}"
+}
+
+# ============================================================
+# Frontmatter reader (先頭の --- --- の中だけ読む)
+# ============================================================
 extract_frontmatter() {
   local file="$1"
   awk '
@@ -123,11 +109,12 @@ extract_frontmatter() {
   ' "$file"
 }
 
-# --------------------------------------------
+# ============================================================
 # Ignore
-# --------------------------------------------
+# ============================================================
 should_ignore() {
   local rel="$1"
+
   case "$rel" in
     .git/*|**/.git/*) return 0;;
     node_modules/*|**/node_modules/*) return 0;;
@@ -149,142 +136,162 @@ should_ignore() {
   return 1
 }
 
-# --------------------------------------------
-# ripgrep regex escape (Rust regex)
-# --------------------------------------------
-re_escape() {
-  local s="$1"
-  s="${s//\\/\\\\}"
-  s="${s//\./\\\.}"
-  s="${s//\*/\\\*}"
-  s="${s//\+/\\\+}"
-  s="${s//\?/\\\?}"
-  s="${s//\^/\\\^}"
-  s="${s//\$/\\\$}"
-  s="${s//\{/\\\{}"
-  s="${s//\}/\\\}}"
-  s="${s//\(/\\\(}"
-  s="${s//\)/\\\)}"
-  s="${s//\[/\\\[}"
-  s="${s//\]/\\\]}"
-  s="${s//\|/\\\|}"
-  printf '%s\n' "$s"
+# ============================================================
+# Index (cache) builder / updater
+# index columns:
+#   file_abs \t canon \t parent_raw \t link \t base \t id
+# ============================================================
+ensure_cache_dir() {
+  mkdir -p "$CACHE_DIR"
 }
 
-make_keys() {
-  local id="$1" base="$2" link="$3"
-  local out=()
-  [[ -n "$id" ]] && out+=("$id" "[[$id]]")
-  [[ -n "$base" ]] && out+=("$base" "[[$base]]")
-  [[ -n "$link" ]] && out+=("$link" "[[$link]]" "$link.md" "[[$link.md]]")
-  printf '%s\n' "${out[@]}" | awk 'NF' | awk '!seen[$0]++'
+emit_index_line_for_file() {
+  local f="$1"
+  local rel base link id parent canon fm
+  rel="$(rel_from_root "$f")"
+  should_ignore "$rel" && return 0
+
+  base="$(basename "$f")"; base="${base%.md}"
+  link="$(strip_md "$rel")"
+
+  fm="$(extract_frontmatter "$f")"
+  id="${fm%%$'\t'*}"
+  parent="${fm#*$'\t'}"
+
+  canon="$id"
+  [[ -z "$canon" ]] && canon="$link"
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$f" "$canon" "$parent" "$link" "$base" "$id"
 }
 
-# --------------------------------------------
-# Root node info
-# --------------------------------------------
+build_index_full() {
+  ensure_cache_dir
+  local tmp
+  tmp="$(mktemp)"
+
+  # 主要ディレクトリは prune して I/O を減らす
+  while IFS= read -r -d '' f; do
+    emit_index_line_for_file "$f" >> "$tmp"
+  done < <(
+    find "$ROOT" \
+      \( -path "$ROOT/.git" -o -path "$ROOT/.git/*" \
+         -o -path "$ROOT/node_modules" -o -path "$ROOT/node_modules/*" \
+         -o -path "$ROOT/.obsidian" -o -path "$ROOT/.obsidian/*" \
+         -o -path "$ROOT/dashboards" -o -path "$ROOT/dashboards/*" \
+         -o -path "$ROOT/templates" -o -path "$ROOT/templates/*" \
+      \) -prune -o \
+      -type f -name '*.md' -print0
+  )
+
+  mv "$tmp" "$CACHE_INDEX"
+  : > "$CACHE_STAMP"
+}
+
+update_index_incremental() {
+  ensure_cache_dir
+  [[ -f "$CACHE_INDEX" ]] || build_index_full
+
+  # stamp が無ければ全作成
+  [[ -f "$CACHE_STAMP" ]] || { build_index_full; return; }
+
+  local tmp_add tmp_compact
+  tmp_add="$(mktemp)"
+  tmp_compact="$(mktemp)"
+
+  # 変更分だけ拾って追記（削除は一旦放置。tree生成時に実ファイル無いものは自然に落ちる）
+  while IFS= read -r -d '' f; do
+    emit_index_line_for_file "$f" >> "$tmp_add"
+  done < <(
+    find "$ROOT" \
+      \( -path "$ROOT/.git" -o -path "$ROOT/.git/*" \
+         -o -path "$ROOT/node_modules" -o -path "$ROOT/node_modules/*" \
+         -o -path "$ROOT/.obsidian" -o -path "$ROOT/.obsidian/*" \
+         -o -path "$ROOT/dashboards" -o -path "$ROOT/dashboards/*" \
+         -o -path "$ROOT/templates" -o -path "$ROOT/templates/*" \
+      \) -prune -o \
+      -type f -name '*.md' -newer "$CACHE_STAMP" -print0
+  )
+
+  # 旧index + 追記 を「同一file_absは最新行を採用」して圧縮
+  cat "$CACHE_INDEX" "$tmp_add" | awk -F'\t' '
+    {
+      file=$1
+      rec[file]=$0    # 同じfileは後勝ち
+    }
+    END{
+      for (k in rec) print rec[k]
+    }
+  ' > "$tmp_compact"
+
+  mv "$tmp_compact" "$CACHE_INDEX"
+  : > "$CACHE_STAMP"
+  rm -f "$tmp_add" 2>/dev/null || true
+}
+
+# ============================================================
+# Tree generation (subtree only, cycle stop)
+# ============================================================
+# ルートノート情報
 ROOT_REL="$(rel_from_root "$TARGET_FILE")"
 ROOT_LINK="$(strip_md "$ROOT_REL")"
 ROOT_BASE="$(basename "$TARGET_FILE")"; ROOT_BASE="${ROOT_BASE%.md}"
-fm="$(extract_frontmatter "$TARGET_FILE")"
-ROOT_ID="${fm%%$'\t'*}"
+fm_root="$(extract_frontmatter "$TARGET_FILE")"
+ROOT_ID="${fm_root%%$'\t'*}"
 [[ -z "$ROOT_ID" ]] && ROOT_ID="$ROOT_BASE"
-ROOT_CANON="$ROOT_ID"  # canonは id 優先
 
-# --------------------------------------------
-# Discovery structures (subtree only)
-# --------------------------------------------
-declare -A alias2canon canon2link canon2base canon2id canon2file canon2keys
-declare -A children discovered enqueued
+# インデックス更新（初回は重い、以降は差分のみ）
+update_index_incremental
 
-register_node() {
-  local canon="$1" id="$2" base="$3" link="$4" file="$5"
-  canon2id["$canon"]="$id"
-  canon2base["$canon"]="$base"
-  canon2link["$canon"]="$link"
+# maps
+declare -A alias2canon canon2link canon2base canon2id canon2file children
+
+register_aliases() {
+  local canon="$1" id="$2" base="$3" link="$4"
+  [[ -n "$id" ]]   && alias2canon["$id"]="$canon"   && alias2canon["[[$id]]"]="$canon"
+  [[ -n "$base" ]] && alias2canon["$base"]="$canon" && alias2canon["[[$base]]"]="$canon"
+  if [[ -n "$link" ]]; then
+    alias2canon["$link"]="$canon"
+    alias2canon["[[$link]]"]="$canon"
+    alias2canon["$link.md"]="$canon"
+    alias2canon["[[$link.md]]"]="$canon"
+  fi
+}
+
+# 1) すべてのノード情報を登録（alias2canonを作る）
+while IFS=$'\t' read -r file canon parent_raw link base id; do
+  # file が消えてても index には残るので、無ければスキップ
+  [[ -f "$file" ]] || continue
   canon2file["$canon"]="$file"
+  canon2link["$canon"]="$link"
+  canon2base["$canon"]="$base"
+  canon2id["$canon"]="$id"
+  register_aliases "$canon" "$id" "$base" "$link"
+done < "$CACHE_INDEX"
 
-  local keys
-  keys="$(make_keys "$id" "$base" "$link")"
-  canon2keys["$canon"]="$keys"
+# 2) children を組む
+while IFS=$'\t' read -r file canon parent_raw link base id; do
+  [[ -f "$file" ]] || continue
+  [[ -z "$parent_raw" || "$parent_raw" == "-" ]] && continue
 
-  while IFS= read -r k; do
-    [[ -z "$k" ]] && continue
-    alias2canon["$k"]="$canon"
-  done <<< "$keys"
-}
+  pcanon="${alias2canon[$parent_raw]:-}"
 
-register_node "$ROOT_CANON" "$ROOT_ID" "$ROOT_BASE" "$ROOT_LINK" "$TARGET_FILE"
+  # 軽い揺れ（クォート等）
+  if [[ -z "$pcanon" ]]; then
+    parent2="${parent_raw%\"}"; parent2="${parent2#\"}"
+    pcanon="${alias2canon[$parent2]:-}"
+  fi
 
-find_children_files_for_canon() {
-  local canon="$1"
-  local keys="${canon2keys[$canon]:-}"
-  [[ -z "$keys" ]] && return 0
+  [[ -z "$pcanon" ]] && continue
+  children["$pcanon"]+="${canon}"$'\n'
+done < "$CACHE_INDEX"
 
-  local alt="" k_esc
-  while IFS= read -r k; do
-    [[ -z "$k" ]] && continue
-    k_esc="$(re_escape "$k")"
-    if [[ -z "$alt" ]]; then alt="$k_esc"; else alt="$alt|$k_esc"; fi
-  done <<< "$keys"
-  [[ -z "$alt" ]] && return 0
+# root canon を解決（id優先 → base → link）
+ROOT_CANON="${alias2canon[$ROOT_ID]:-}"
+[[ -z "$ROOT_CANON" ]] && ROOT_CANON="${alias2canon[$ROOT_BASE]:-}"
+[[ -z "$ROOT_CANON" ]] && ROOT_CANON="${alias2canon[$ROOT_LINK]:-}"
+# それでも無ければ id を canon とみなす（最低限のフォールバック）
+[[ -z "$ROOT_CANON" ]] && ROOT_CANON="$ROOT_ID"
 
-  local pattern="^parent:[[:space:]]*['\"]?(${alt})['\"]?[[:space:]]*$"
-
-  rg -l --no-messages \
-     --glob='!.git/**' --glob='!node_modules/**' --glob='!.obsidian/**' \
-     --glob='!dashboards/**' --glob='!templates/**' \
-     "$pattern" "$ROOT" || true
-}
-
-queue=("$ROOT_CANON")
-enqueued["$ROOT_CANON"]=1
-
-while ((${#queue[@]} > 0)); do
-  parent_canon="${queue[0]}"
-  queue=("${queue[@]:1}")
-
-  [[ -n "${discovered[$parent_canon]+x}" ]] && continue
-  discovered["$parent_canon"]=1
-
-  while IFS= read -r f; do
-    [[ -z "$f" ]] && continue
-    f="$(abs_path "$f")"
-    rel="$(rel_from_root "$f")"
-    should_ignore "$rel" && continue
-
-    fm="$(extract_frontmatter "$f")"
-    cid="${fm%%$'\t'*}"
-    cparent_raw="${fm#*$'\t'}"
-
-    cbase="$(basename "$f")"; cbase="${cbase%.md}"
-    clink="$(strip_md "$rel")"
-    ccanon="$cid"; [[ -z "$ccanon" ]] && ccanon="$clink"
-
-    pcanon="${alias2canon[$cparent_raw]:-}"
-    if [[ -z "$pcanon" ]]; then
-      # クォート付き等の軽い揺れ対応
-      pcanon="${alias2canon[${cparent_raw%\"}]:-}"
-      pcanon="${pcanon:-${alias2canon[${cparent_raw#\"}]:-}}"
-    fi
-    [[ -z "$pcanon" ]] && continue
-
-    if [[ -z "${canon2link[$ccanon]:-}" ]]; then
-      register_node "$ccanon" "$cid" "$cbase" "$clink" "$f"
-    fi
-
-    children["$pcanon"]+="${ccanon}"$'\n'
-
-    if [[ -z "${enqueued[$ccanon]+x}" ]]; then
-      queue+=("$ccanon")
-      enqueued["$ccanon"]=1
-    fi
-  done < <(find_children_files_for_canon "$parent_canon")
-done
-
-# --------------------------------------------
-# Print tree (cycle detect)
-# --------------------------------------------
 TREE_MD="$(mktemp)"
 OUT_TMP="$(mktemp)"
 trap 'rm -f "$TREE_MD" "$OUT_TMP" 2>/dev/null || true' EXIT
@@ -302,6 +309,7 @@ print_tree() {
   local list="${children[$canon]:-}"
   [[ -z "$list" ]] && return
 
+  # 子を link でソート（安定表示）
   mapfile -t kids < <(
     printf '%s' "$list" |
       awk 'NF' | awk '!seen[$0]++' |
@@ -315,6 +323,7 @@ print_tree() {
 
   for child in "${kids[@]}"; do
     [[ -z "$child" ]] && continue
+    [[ -n "${canon2link[$child]:-}" ]] || continue
 
     if [[ -n "${onpath[$child]+x}" ]]; then
       printf '%s- [[%s]] 🔁 (cycle)\n' "$indent" "${canon2link[$child]}"
@@ -336,7 +345,9 @@ print_tree() {
 }
 
 {
-  echo "- **[[${canon2link[$ROOT_CANON]}]]**"
+  # ルートが index に無い/リンク不明でも落ちないように
+  root_link="${canon2link[$ROOT_CANON]:-$ROOT_LINK}"
+  echo "- **[[${root_link}]]**"
   printed["$ROOT_CANON"]=1
   onpath["$ROOT_CANON"]=1
   print_tree "$ROOT_CANON" 1
@@ -345,9 +356,9 @@ print_tree() {
   echo "> descendants: $desc_count"
 } > "$TREE_MD"
 
-# --------------------------------------------
-# Insert/replace in note
-# --------------------------------------------
+# ============================================================
+# Insert / Replace block
+# ============================================================
 if grep -qF "$MARK_BEGIN" "$TARGET_FILE" && grep -qF "$MARK_END" "$TARGET_FILE"; then
   awk -v b="$MARK_BEGIN" -v e="$MARK_END" -v tf="$TREE_MD" '
     function dump_tree(   l) { while ((getline l < tf) > 0) print l; close(tf) }
@@ -370,4 +381,4 @@ else
 fi
 
 mv "$OUT_TMP" "$TARGET_FILE"
-echo "[OK] Tree updated (subtree only): $TARGET_FILE"
+echo "[OK] Tree updated: $TARGET_FILE"
