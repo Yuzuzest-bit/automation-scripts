@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-TARGET_FILE="${1:-}"
-shift || true
-
-ROOT="${ZK_ROOT:-$PWD}"
-MAX_DEPTH=20
+# --------------------------------------------
+# Defaults
+# --------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="${ZK_ROOT:-$SCRIPT_DIR}"   # ← デフォルトは「このスクリプトがあるフォルダ」
+MAX_DEPTH=0                      # ← 0 = 無制限
 SECTION_TITLE="## Tree"
 MARK_BEGIN="<!--TREE:BEGIN-->"
 MARK_END="<!--TREE:END-->"
@@ -13,24 +14,24 @@ IGNORE_FILE=".dashboardignore"
 
 usage() {
   cat >&2 <<'EOF'
-usage: zk_insert_tree.sh <current.md> [--root ROOT] [--max-depth N] [--title "## Tree"]
-- 今開いているノート（current.md）を起点に、parent: 参照を辿って「そのサブツリーだけ」出力
+usage: zk_insert_tree.sh <current.md> [options]
+
+options:
+  --root ROOT          (default: script folder)
+  --max-depth N        (default: unlimited; 0 means unlimited)
+  --title "## Tree"    (default: ## Tree)
+
+notes:
+- current.md を起点に parent: を辿って「そのサブツリーだけ」出力
 - 循環参照は "🔁 (cycle)" と表示してその枝の探索を中断
 - ripgrep (rg) が必要
 EOF
   exit 2
 }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --root) ROOT="${2:-}"; shift 2;;
-    --max-depth) MAX_DEPTH="${2:-20}"; shift 2;;
-    --title) SECTION_TITLE="${2:-## Tree}"; shift 2;;
-    -h|--help) usage;;
-    *) shift 1;;
-  esac
-done
-
+# --------------------------------------------
+# Helpers (path)
+# --------------------------------------------
 to_posix() {
   local p="$1"
   if command -v cygpath >/dev/null 2>&1; then
@@ -55,7 +56,39 @@ abs_path() {
   fi
 }
 
+strip_md() {
+  local p="$1"
+  p="${p%.md}"
+  printf '%s\n' "$p"
+}
+
+rel_from_root() {
+  local full="$1"
+  full="$(abs_path "$full")"
+  local r
+  r="$(abs_path "$ROOT")"
+  r="${r%/}/"
+  full="${full#"$r"}"
+  printf '%s\n' "$full"
+}
+
+# --------------------------------------------
+# Parse args
+# --------------------------------------------
+TARGET_FILE="${1:-}"
 [[ -z "$TARGET_FILE" ]] && usage
+shift || true
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --root) ROOT="${2:-}"; shift 2;;
+    --max-depth) MAX_DEPTH="${2:-0}"; shift 2;;
+    --title) SECTION_TITLE="${2:-## Tree}"; shift 2;;
+    -h|--help) usage;;
+    *) shift 1;;
+  esac
+done
+
 TARGET_FILE="$(abs_path "$TARGET_FILE")"
 ROOT="$(abs_path "$ROOT")"
 
@@ -66,25 +99,12 @@ fi
 
 if ! command -v rg >/dev/null 2>&1; then
   echo "[ERR] rg (ripgrep) not found. This fast subtree mode requires rg." >&2
-  echo "      Install ripgrep and ensure 'rg' is in PATH, then retry." >&2
   exit 2
 fi
 
-rel_from_root() {
-  local full="$1"
-  full="$(abs_path "$full")"
-  local r="$ROOT"
-  r="${r%/}/"
-  full="${full#"$r"}"
-  printf '%s\n' "$full"
-}
-
-strip_md() {
-  local p="$1"
-  p="${p%.md}"
-  printf '%s\n' "$p"
-}
-
+# --------------------------------------------
+# Frontmatter read
+# --------------------------------------------
 extract_frontmatter() {
   local file="$1"
   awk '
@@ -103,9 +123,11 @@ extract_frontmatter() {
   ' "$file"
 }
 
+# --------------------------------------------
+# Ignore
+# --------------------------------------------
 should_ignore() {
   local rel="$1"
-
   case "$rel" in
     .git/*|**/.git/*) return 0;;
     node_modules/*|**/node_modules/*) return 0;;
@@ -121,15 +143,15 @@ should_ignore() {
       line="${line#"${line%%[![:space:]]*}"}"
       line="${line%"${line##*[![:space:]]}"}"
       [[ -z "$line" ]] && continue
-      if [[ "$rel" == *"$line"* ]]; then
-        return 0
-      fi
+      [[ "$rel" == *"$line"* ]] && return 0
     done < "$ig"
   fi
   return 1
 }
 
-# ripgrep用に正規表現エスケープ（Rust regex）
+# --------------------------------------------
+# ripgrep regex escape (Rust regex)
+# --------------------------------------------
 re_escape() {
   local s="$1"
   s="${s//\\/\\\\}"
@@ -149,7 +171,6 @@ re_escape() {
   printf '%s\n' "$s"
 }
 
-# キーのバリエーション（parent: が id / basename / link / [[...]] を取り得る場合に備える）
 make_keys() {
   local id="$1" base="$2" link="$3"
   local out=()
@@ -159,33 +180,25 @@ make_keys() {
   printf '%s\n' "${out[@]}" | awk 'NF' | awk '!seen[$0]++'
 }
 
-# ---- ルートノートの情報 ----
+# --------------------------------------------
+# Root node info
+# --------------------------------------------
 ROOT_REL="$(rel_from_root "$TARGET_FILE")"
 ROOT_LINK="$(strip_md "$ROOT_REL")"
-ROOT_BASE="$(basename "$TARGET_FILE")"
-ROOT_BASE="${ROOT_BASE%.md}"
-
+ROOT_BASE="$(basename "$TARGET_FILE")"; ROOT_BASE="${ROOT_BASE%.md}"
 fm="$(extract_frontmatter "$TARGET_FILE")"
 ROOT_ID="${fm%%$'\t'*}"
 [[ -z "$ROOT_ID" ]] && ROOT_ID="$ROOT_BASE"
+ROOT_CANON="$ROOT_ID"  # canonは id 優先
 
-# canon: idがあればid、無ければlink
-ROOT_CANON="$ROOT_ID"
-
-# ---- 探索用データ構造（Bash4の連想配列） ----
-declare -A alias2canon      # key -> canon（発見済みノードだけ）
-declare -A canon2link       # canon -> wiki link(path without .md)
-declare -A canon2base       # canon -> basename
-declare -A canon2id         # canon -> id
-declare -A canon2file       # canon -> abs filepath
-declare -A canon2keys       # canon -> keys joined by \n
-declare -A children         # canon -> child canons joined by \n
-declare -A discovered       # canon -> 1（探索済み）
-declare -A enqueued         # canon -> 1（キュー投入済み）
+# --------------------------------------------
+# Discovery structures (subtree only)
+# --------------------------------------------
+declare -A alias2canon canon2link canon2base canon2id canon2file canon2keys
+declare -A children discovered enqueued
 
 register_node() {
   local canon="$1" id="$2" base="$3" link="$4" file="$5"
-
   canon2id["$canon"]="$id"
   canon2base["$canon"]="$base"
   canon2link["$canon"]="$link"
@@ -201,50 +214,37 @@ register_node() {
   done <<< "$keys"
 }
 
-# ルート登録
 register_node "$ROOT_CANON" "$ROOT_ID" "$ROOT_BASE" "$ROOT_LINK" "$TARGET_FILE"
-
-# ---- BFSで「サブツリーに必要な分だけ」発見する ----
-queue=("$ROOT_CANON")
-enqueued["$ROOT_CANON"]=1
 
 find_children_files_for_canon() {
   local canon="$1"
-  local keys="${canon2keys[$canon]}"
+  local keys="${canon2keys[$canon]:-}"
   [[ -z "$keys" ]] && return 0
 
-  # keys から alternation を作る
-  local alt=""
+  local alt="" k_esc
   while IFS= read -r k; do
     [[ -z "$k" ]] && continue
     k_esc="$(re_escape "$k")"
-    if [[ -z "$alt" ]]; then
-      alt="$k_esc"
-    else
-      alt="$alt|$k_esc"
-    fi
+    if [[ -z "$alt" ]]; then alt="$k_esc"; else alt="$alt|$k_esc"; fi
   done <<< "$keys"
-
   [[ -z "$alt" ]] && return 0
 
-  # parent: の値が keys のいずれか（クォートは任意）に一致する行を持つファイルを列挙
-  # 例: parent: 2025-... / parent: "xxx" / parent: [[xxx]]
   local pattern="^parent:[[:space:]]*['\"]?(${alt})['\"]?[[:space:]]*$"
 
-  rg -l --no-messages --glob='!.git/**' --glob='!node_modules/**' --glob='!.obsidian/**' \
+  rg -l --no-messages \
+     --glob='!.git/**' --glob='!node_modules/**' --glob='!.obsidian/**' \
      --glob='!dashboards/**' --glob='!templates/**' \
      "$pattern" "$ROOT" || true
 }
+
+queue=("$ROOT_CANON")
+enqueued["$ROOT_CANON"]=1
 
 while ((${#queue[@]} > 0)); do
   parent_canon="${queue[0]}"
   queue=("${queue[@]:1}")
 
-  # 深さ制限は「発見フェーズ」でも効かせる（深すぎる探索を抑止）
-  # ここでは厳密深さ管理はせず、出力時にMAX_DEPTHで切る（発見は多少多めでもOK）
-  if [[ -n "${discovered[$parent_canon]+x}" ]]; then
-    continue
-  fi
+  [[ -n "${discovered[$parent_canon]+x}" ]] && continue
   discovered["$parent_canon"]=1
 
   while IFS= read -r f; do
@@ -253,7 +253,6 @@ while ((${#queue[@]} > 0)); do
     rel="$(rel_from_root "$f")"
     should_ignore "$rel" && continue
 
-    # 子ファイルの情報を読む
     fm="$(extract_frontmatter "$f")"
     cid="${fm%%$'\t'*}"
     cparent_raw="${fm#*$'\t'}"
@@ -262,24 +261,20 @@ while ((${#queue[@]} > 0)); do
     clink="$(strip_md "$rel")"
     ccanon="$cid"; [[ -z "$ccanon" ]] && ccanon="$clink"
 
-    # 親canon解決（必ず発見済みのどれかの alias に当たるはず）
     pcanon="${alias2canon[$cparent_raw]:-}"
     if [[ -z "$pcanon" ]]; then
-      # parent: が "xxx" だった等のケース（クォート付きで入ってる可能性）に軽く対応
+      # クォート付き等の軽い揺れ対応
       pcanon="${alias2canon[${cparent_raw%\"}]:-}"
       pcanon="${pcanon:-${alias2canon[${cparent_raw#\"}]:-}}"
     fi
     [[ -z "$pcanon" ]] && continue
 
-    # 子ノード登録（未登録なら）
     if [[ -z "${canon2link[$ccanon]:-}" ]]; then
       register_node "$ccanon" "$cid" "$cbase" "$clink" "$f"
     fi
 
-    # children 追加（重複回避は後で uniq）
     children["$pcanon"]+="${ccanon}"$'\n'
 
-    # まだ探索してなければキューへ
     if [[ -z "${enqueued[$ccanon]+x}" ]]; then
       queue+=("$ccanon")
       enqueued["$ccanon"]=1
@@ -287,33 +282,35 @@ while ((${#queue[@]} > 0)); do
   done < <(find_children_files_for_canon "$parent_canon")
 done
 
-# ---- ツリー出力（循環検出しながら） ----
+# --------------------------------------------
+# Print tree (cycle detect)
+# --------------------------------------------
 TREE_MD="$(mktemp)"
 OUT_TMP="$(mktemp)"
 trap 'rm -f "$TREE_MD" "$OUT_TMP" 2>/dev/null || true' EXIT
 
-declare -A onpath
-declare -A printed
+declare -A onpath printed
 desc_count=0
 
 print_tree() {
-  local canon="$1"
-  local depth="$2"
+  local canon="$1" depth="$2"
 
-  if (( depth > MAX_DEPTH )); then
+  if (( MAX_DEPTH > 0 && depth > MAX_DEPTH )); then
     return
   fi
 
   local list="${children[$canon]:-}"
   [[ -z "$list" ]] && return
 
-  # sort by link for stable output
-  mapfile -t kids < <(printf '%s' "$list" | awk 'NF' | awk '!seen[$0]++' | while read -r c; do
-    printf '%s\t%s\n' "${canon2link[$c]:-}" "$c"
-  done | sort | awk -F'\t' '{print $2}')
+  mapfile -t kids < <(
+    printf '%s' "$list" |
+      awk 'NF' | awk '!seen[$0]++' |
+      while read -r c; do
+        printf '%s\t%s\n' "${canon2link[$c]:-}" "$c"
+      done | sort | awk -F'\t' '{print $2}'
+  )
 
-  local child indent
-  indent=""
+  local indent="" child
   for ((i=0;i<depth;i++)); do indent+="  "; done
 
   for child in "${kids[@]}"; do
@@ -348,13 +345,12 @@ print_tree() {
   echo "> descendants: $desc_count"
 } > "$TREE_MD"
 
-# ---- ノートへ挿入（マーカーがあれば置換、無ければ末尾に追記） ----
+# --------------------------------------------
+# Insert/replace in note
+# --------------------------------------------
 if grep -qF "$MARK_BEGIN" "$TARGET_FILE" && grep -qF "$MARK_END" "$TARGET_FILE"; then
   awk -v b="$MARK_BEGIN" -v e="$MARK_END" -v tf="$TREE_MD" '
-    function dump_tree(   l) {
-      while ((getline l < tf) > 0) print l
-      close(tf)
-    }
+    function dump_tree(   l) { while ((getline l < tf) > 0) print l; close(tf) }
     BEGIN{inblk=0}
     index($0,b)>0 { print; inblk=1; dump_tree(); next }
     index($0,e)>0 { inblk=0; print; next }
