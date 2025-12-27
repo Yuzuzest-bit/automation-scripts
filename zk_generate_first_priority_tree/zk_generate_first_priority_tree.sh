@@ -1,137 +1,198 @@
 #!/usr/bin/env bash
+# zk_generate_first_priority_tree.sh
+#
+# Windows (Git Bash) 最適化版:
+# - UTF-8エンコーディングの明示
+# - Windowsのパス形式とCRLFへの耐性強化
 
+# 文字化け防止（絵文字を正しく扱うため）
 export LC_ALL=C.UTF-8
+
 set -Eeuo pipefail
 
 # --- 設定 ---
+MAX_DEPTH=0
 OUTDIR_NAME="dashboards"
 FIXED_FILENAME="TREE_VIEW.md"
-CACHE_FILE=".tree_cache.txt"
 
-# アイコン
+# アイコン定義
 ICON_CLOSED="✅ "
 ICON_OPEN="📖 "
 ICON_ERROR="⚠️ "
 ICON_FOCUS="🎯 "
 ICON_AWAIT="⏳ "
 ICON_BLOCK="🧱 "
-ICON_CYCLE="🔁 "
-ICON_ALREADY="🔗 "
+ICON_CYCLE="🔁 (infinite loop) "
+ICON_ALREADY="🔗 (already shown) "
 
-usage() { echo "usage: $0 <source_note.md>" >&2; exit 2; }
+usage() {
+  echo "usage: $0 <source_note.md>" >&2
+  exit 2
+}
 
-TARGET_FILE_RAW="${1:-}"
-[[ -z "$TARGET_FILE_RAW" ]] && usage
-TARGET_FILE_ABS=$(readlink -f "$TARGET_FILE_RAW")
-ROOT="$(pwd)"
-OUTPUT_FILE="${ROOT}/${OUTDIR_NAME}/${FIXED_FILENAME}"
-mkdir -p "${ROOT}/${OUTDIR_NAME}"
+# パス解決の修正（Windowsの絶対パスをGit Bash形式に統一）
+TARGET_FILE="${1:-}"
+[[ -z "$TARGET_FILE" ]] && usage
 
-# キャッシュ用配列
-# 構造: [ファイルパス]="最終更新秒 | ID | ステータスアイコン | 追加情報 | 子リンク(スペース区切り)"
-declare -A FILE_CACHE
-
-# --- 1. キャッシュの読み込み ---
-if [[ -f "$CACHE_FILE" ]]; then
-    echo "Loading cache..."
-    while IFS=$'\t' read -r f_path cache_data; do
-        FILE_CACHE["$f_path"]="$cache_data"
-    done < "$CACHE_FILE"
+# 実体のパスを取得
+if [[ "$TARGET_FILE" == /* ]]; then
+    # すでにPOSIX形式（/c/...）の場合
+    TARGET_FILE="$(cd "$(dirname "$TARGET_FILE")" && pwd)/$(basename "$TARGET_FILE")"
+else
+    # Windows形式のパスが渡された場合に対応
+    TARGET_FILE="$(cd "$(dirname "$TARGET_FILE")" && pwd)/$(basename "$TARGET_FILE")"
 fi
+ROOT="$(pwd)"
 
-# --- 2. 高速スキャン & 解析 (差分のみ) ---
+OUTDIR="${ROOT}/${OUTDIR_NAME}"
+mkdir -p "$OUTDIR"
+OUTPUT_FILE="${OUTDIR}/${FIXED_FILENAME}"
+
+# --- 1. IDインデックスの作成 ---
 declare -A ID_MAP
-echo "Syncing Vault..."
-
+echo "Scanning Vault..."
+# .git や .vscode などを除外して高速化
 while read -r f; do
-    # 最終更新日時を取得
-    mtime=$(stat -c %Y "$f")
-    
-    # キャッシュがあるか確認
-    cached_entry="${FILE_CACHE["$f"]:-}"
-    cached_mtime="${cached_entry%%|*}"
+  fid=$(awk '/^id:[[:space:]]*/ { sub(/^id:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }' "$f")
+  if [[ -n "$fid" ]]; then ID_MAP["$fid"]="$f"; fi
+  fname=$(basename "${f%.md}")
+  if [[ -z "${ID_MAP[$fname]:-}" ]]; then ID_MAP["$fname"]="$f"; fi
+done < <(find "$ROOT" -maxdepth 4 -name "*.md" -not -path "*/.*")
 
-    if [[ -n "$cached_entry" && "$mtime" == "$cached_mtime" ]]; then
-        # 更新されていないのでキャッシュを利用
-        data="${cached_entry#*|}"
-        fid="${data%%|*}"
-    else
-        # 新規または更新されたファイルのみ解析
-        # 1. ID抽出
-        fid=$(grep -m 1 "^id:" "$f" | sed 's/id:[[:space:]]*//;s/\r//' || true)
-        [[ -z "$fid" ]] && fid=$(basename "$f" .md)
-        
-        # 2. ステータス抽出
-        meta=$(grep -m 30 -E "^closed:|@focus|@awaiting|@blocked" "$f" | tr -d '\r' || true)
-        icons="$ICON_OPEN"; [[ "$meta" == *"closed:"* ]] && icons="$ICON_CLOSED"
-        extra=""
-        if [[ "$meta" == *"@focus"* ]]; then icons+="$ICON_FOCUS"
-        elif [[ "$meta" == *"@blocked"* ]]; then icons+="$ICON_BLOCK"; extra=" (🧱 $(echo "$meta" | sed -n 's/.*@blocked//p' | head -n1 | xargs))"
-        elif [[ "$meta" == *"@awaiting"* ]]; then icons+="$ICON_AWAIT"; extra=" (⏳ $(echo "$meta" | sed -n 's/.*@awaiting//p' | head -n1 | xargs))"
-        fi
-        
-        # 3. リンク抽出 (子要素)
-        links=$(awk 'BEGIN{fm=0;code=0;f=0}{line=$0;sub(/\r$/,"",line);t=line;gsub(/^[ \t]+|[ \t]+$/,"",t);if(!f){if(t=="")next;f=1;if(t=="---"){fm=1;next}};if(fm){if(t=="---")fm=0;next};if(t~/^```/){code=!code;next};if(code)next;while(match(line,/\[\[[^][]+\]\]/)){s=substr(line,RSTART+2,RLENGTH-4);p=index(s,"|");if(p>0)s=substr(s,1,p-1);p=index(s,"#");if(p>0)s=substr(s,1,p-1);printf "%s ",s;line=substr(line,RSTART+RLENGTH)}}' "$f")
-        
-        # キャッシュ更新
-        FILE_CACHE["$f"]="$mtime|$fid|$icons|$extra|$links"
+# --- 2. 状態取得関数（WindowsのCRLF改行に対応） ---
+get_status_details() {
+  local f_path="$1"
+  [[ ! -f "$f_path" ]] && { echo "$ICON_ERROR|"; return; }
+
+  local icons=""
+  local extra_info=""
+
+  # Closed判定 (改行コード \r を除去して判定)
+  if head -n 30 "$f_path" | tr -d '\r' | grep -qE '^closed:[[:space:]]*.+'; then
+    icons+="$ICON_CLOSED"
+  else
+    icons+="$ICON_OPEN"
+  fi
+
+  # 最初に見つかったマーカーを取得
+  local first_match
+  first_match=$(grep -niE '@focus|@awaiting|@blocked' "$f_path" | tr -d '\r' | sort -t: -k1,1n | head -n 1 || true)
+
+  if [[ -n "$first_match" ]]; then
+    local line_content
+    line_content=$(echo "$first_match" | cut -d: -f2-)
+    local lower_content
+    lower_content=$(echo "$line_content" | tr '[:upper:]' '[:lower:]')
+
+    if [[ "$lower_content" == *"@focus"* ]]; then
+      icons+="$ICON_FOCUS"
+    elif [[ "$lower_content" == *"@blocked"* ]]; then
+      icons+="$ICON_BLOCK"
+      local info
+      info=$(echo "$line_content" | sed -n 's/.*@blocked[[:space:]]*\(.*\)/\1/p')
+      [[ -n "$info" ]] && extra_info=" (🧱 $info)"
+    elif [[ "$lower_content" == *"@awaiting"* ]]; then
+      icons+="$ICON_AWAIT"
+      local info
+      info=$(echo "$line_content" | sed -n 's/.*@awaiting[[:space:]]*\(.*\)/\1/p')
+      [[ -n "$info" ]] && extra_info=" (⏳ $info)"
     fi
-    
-    # IDマップ作成
-    ID_MAP["$fid"]="$f"
-    
-done < <(find "$ROOT" -maxdepth 4 -name "*.md" -not -path "*/.*" -not -path "*/$OUTDIR_NAME/*")
+  fi
+  echo "${icons}|${extra_info}"
+}
 
-# --- 3. キャッシュをファイルに保存 ---
-for f in "${!FILE_CACHE[@]}"; do
-    printf "%s\t%s\n" "$f" "${FILE_CACHE[$f]}"
-done > "$CACHE_FILE"
+# --- 3. リンク抽出関数 (CRLF対応済み) ---
+extract_wikilinks() {
+  awk '
+    function strip_bom(s){ sub(/^\357\273\277/, "", s); return s }
+    function trim(s){ gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    BEGIN{in_fm=0; in_code_block=0; first=0}
+    {
+      line=$0; sub(/\r$/, "", line); line=strip_bom(line); t=trim(line)
+      if(!first){ if(t=="")next; first=1; if(t=="---"){in_fm=1;next}}
+      if(in_fm){ if(t=="---"){in_fm=0}; next}
+      if(t ~ /^```/ || t ~ /^~~~/){ in_code_block = !in_code_block; next }
+      if(in_code_block) next
+      gsub(/`[^`]+`/, "", line)
+      while(match(line, /\[\[[^][]+\]\]/)){
+        s=substr(line, RSTART+2, RLENGTH-4)
+        p=index(s,"|"); if(p>0) s=substr(s,1,p-1)
+        p=index(s,"#"); if(p>0) s=substr(s,1,p-1)
+        print trim(s)
+        line=substr(line, RSTART+RLENGTH)
+      }
+    }
+  ' "$1"
+}
 
-# --- 4. ツリー構築 (メモリ上のデータのみで行うので一瞬) ---
-declare -A visited
-TREE=""
+# --- 4. ツリー構築 ---
+declare -A visited_global
+TREE_CONTENT=""
 
 build_tree() {
-    local target="$1" depth="$2" stack="$3"
-    local indent=""; for ((i=0; i<depth; i++)); do indent+="  "; done
+  local link_target="$1" depth="$2" current_stack="$3"
+  local indent=""
+  for ((i=0; i<depth; i++)); do indent+="  "; done
 
-    local f="${ID_MAP["$target"]:-}"
-    if [[ -z "$f" || ! -f "$f" ]]; then
-        TREE+="${indent}- [[${target}]] ${ICON_ERROR}\n"; return
-    fi
+  local f_path="${ID_MAP[$link_target]:-}"
+  if [[ -z "$f_path" || ! -f "$f_path" ]]; then
+    TREE_CONTENT+="${indent}- [[${link_target}]] ${ICON_ERROR}\n"
+    return
+  fi
 
-    local data="${FILE_CACHE["$f"]#*|}" # IDを取り除く
-    local fid="${data%%|*}"
-    local rest="${data#*|}"
-    local icons="${rest%%|*}"
-    local rest2="${rest#*|}"
-    local extra="${rest2%%|*}"
-    local links="${rest2#*|}"
+  local display_name
+  display_name=$(basename "${f_path%.md}")
+  local details
+  details=$(get_status_details "$f_path")
+  local status_icons="${details%|*}"
+  local extra_info="${details#*|}"
 
-    if [[ "$stack" == *"[${f}]"* ]]; then TREE+="${indent}- [[${fid}]] ${ICON_CYCLE}\n"; return; fi
-    if [[ -n "${visited["$f"]:-}" ]]; then TREE+="${indent}- [[${fid}]] ${icons}${ICON_ALREADY}\n"; return; fi
-    visited["$f"]=1
+  # 循環参照チェック (パス文字列比較)
+  if [[ "$current_stack" == *"[${f_path}]"* ]]; then
+    TREE_CONTENT+="${indent}- [[${display_name}]] ${status_icons}${ICON_CYCLE}\n"
+    return
+  fi
 
-    TREE+="${indent}- [[${fid}]] ${icons}${extra}\n"
-    for child in $links; do
-        build_tree "$child" $((depth + 1)) "${stack}[${f}]"
-    done
+  if [[ -n "${visited_global[$f_path]:-}" ]]; then
+    TREE_CONTENT+="${indent}- [[${display_name}]] ${status_icons}${ICON_ALREADY}\n"
+    return
+  fi
+
+  visited_global[$f_path]=1
+  TREE_CONTENT+="${indent}- [[${display_name}]] ${status_icons}${extra_info}\n"
+
+  while read -r child; do
+    [[ -z "$child" ]] && continue
+    build_tree "$child" $((depth + 1)) "${current_stack}[${f_path}]"
+  done < <(extract_wikilinks "$f_path")
 }
 
 # --- 5. 実行 ---
-START_ID=$(grep -m 1 "^id:" "$TARGET_FILE_ABS" | sed 's/id:[[:space:]]*//;s/\r//' || true)
-[[ -z "$START_ID" ]] && START_ID=$(basename "$TARGET_FILE_ABS" .md)
+DISPLAY_NAME=$(basename "${TARGET_FILE%.md}")
+START_ID=$(awk '/^id:[[:space:]]*/ { sub(/^id:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }' "$TARGET_FILE")
+[[ -z "$START_ID" ]] && START_ID="$DISPLAY_NAME"
 
-echo "Building Tree..."
+echo "Updating Visual Priority Tree for ${DISPLAY_NAME}..."
 build_tree "$START_ID" 0 ""
 
 NOW=$(date '+%Y-%m-%dT%H:%M:%S')
 {
-    echo "---"; echo "title: Tree - $START_ID"; echo "---"
-    echo "# 🌲 Tree View: [[$START_ID]]"
-    echo "- 生成: $NOW (Cache sync completed)"
-    echo "---"
-    echo -e "$TREE"
+  echo "---"
+  echo "id: $(date '+%Y%m%d%H%M')-TREE-VIEW"
+  echo "tags: [system, zk-archive]"
+  echo "title: Status Tree - ${DISPLAY_NAME}"
+  echo "closed: ${NOW}"
+  echo "---"
+  echo "# 🌲 Visual Priority Tree: [[${DISPLAY_NAME}]]"
+  echo "- 生成日時: ${NOW}"
+  echo "- 凡例: ✅ 完 / 📖 開 / 🎯 集中 / 🧱 閉塞 / ⏳ 待機 / 🔗 既出 / 🔁 循環"
+  echo "---"
+  echo -e "$TREE_CONTENT"
 } > "$OUTPUT_FILE"
 
-echo "Success: $OUTPUT_FILE"
+echo "[OK] Tree View saved to: $OUTPUT_FILE"
+
+# VS Codeで開く（Git Bash環境用）
+if command -v code >/dev/null 2>&1; then
+  code "$OUTPUT_FILE"
+fi
