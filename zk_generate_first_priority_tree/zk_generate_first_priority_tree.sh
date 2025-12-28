@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # zk_generate_cached_tree_v7_4_fixed.sh
-# v7.4.5-debuggable
+# v7.4.6-decision-state
 #
 # 目的:
 # - 起点ノートから [[wikilink]] を辿ってツリー表示を生成
 # - キャッシュにより、必要なノードだけオンデマンド解析（vault全体の内容スキャンはしない）
 #
-# 今回の症状の根治:
-# - dashboards 配下を起点にしても ROOT を vault に補正（dashboards/dashboards問題）
-# - ファイル名→パス(ID_MAP)は毎回 find で構築（「存在するのに⚠️」問題）
-# - ノード訪問時にメタ未取得/破損/mtime不一致ならその場で再スキャン（rootだけ問題）
+# 追加(今回):
+# - frontmatter の decision: を読み取り、Tree表示の状態アイコンを上書き
+#     decision: accepted   -> ✅
+#     decision: rejected   -> ❌
+#     decision: superseded -> ♻️
+#     decision: dropped    -> 💤
+#     decision: proposed/その他 -> 🟡
+# - decision が終端状態(accepted/rejected/superseded/dropped)のときは
+#   @awaiting/@blocked/@focus などのマーカー表示を抑制（待ちが残骸で付いても汚れない）
 #
 # デバッグ:
 #   ZK_DEBUG=1 : 詳細ログ
@@ -21,19 +26,25 @@
 set -Eeuo pipefail
 export LANG=en_US.UTF-8
 
-# --- 失敗箇所を1発で出す（最重要） ---
 trap 'rc=$?; printf "[ERR] exit=%d line=%d cmd=%s\n" "$rc" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 OUTDIR_NAME="dashboards"
 FIXED_FILENAME="TREE_VIEW.md"
 
-CACHE_VERSION="v7.4.5"
+CACHE_VERSION="v7.4.6"
 CACHE_FILE=".zk_metadata_cache_${CACHE_VERSION}.tsv"
-CACHE_MAGIC="#ZK_CACHE\tv7.4.5\tcols=5\tlinks=pipe"
+CACHE_MAGIC="#ZK_CACHE\tv7.4.6\tcols=5\tlinks=pipe"
 
 ICON_CLOSED="✅ "; ICON_OPEN="📖 "; ICON_ERROR="⚠️ "
 ICON_FOCUS="🎯 "; ICON_AWAIT="⏳ "; ICON_BLOCK="🧱 "
 ICON_CYCLE="🔁 (infinite loop) "; ICON_ALREADY="🔗 (already shown) "
+
+# decision state icons
+ICON_ACCEPT="✅ "
+ICON_REJECT="❌ "
+ICON_SUPER="♻️ "
+ICON_DROP="💤 "
+ICON_PROPOSE="🟡 "
 
 ZK_DEBUG="${ZK_DEBUG:-0}"
 ZK_DIAG="${ZK_DIAG:-0}"
@@ -48,8 +59,6 @@ dbg() {
 info() { printf '[INFO] %s\n' "$*" >&2; return 0; }
 die()  { printf '[ERR] %s\n' "$*" >&2; exit 1; }
 
-
-# ---- bash version check ----
 if (( BASH_VERSINFO[0] < 4 )); then
   die "bash >= 4 required. Use /opt/homebrew/bin/bash (brew bash) or Git Bash."
 fi
@@ -65,7 +74,6 @@ detect_root() {
   local start d
   start="$(cd "$(dirname "$TARGET_FILE")" && pwd -P)"
 
-  # ★最重要: dashboards配下から起動されたら、dashboardsの親をROOTにする
   case "$start" in
     */"$OUTDIR_NAME")
       ROOT_REASON="from_dashboards_dir"
@@ -79,7 +87,6 @@ detect_root() {
       ;;
   esac
 
-  # .obsidian が無い運用もあるので、複数の目印を探す
   d="$start"
   while :; do
     if [[ -d "$d/.obsidian" ]]; then ROOT_REASON="found_.obsidian"; printf "%s\n" "$d"; return; fi
@@ -96,7 +103,6 @@ detect_root() {
 
 ROOT="$(detect_root)"
 
-# フェイルセーフ: ROOT が dashboards そのものになったら親へ矯正
 if [[ "$(basename "$ROOT")" == "$OUTDIR_NAME" ]]; then
   ROOT_REASON="${ROOT_REASON}+auto_fix_parent"
   ROOT="$(cd "$ROOT/.." && pwd -P)"
@@ -127,7 +133,6 @@ if [[ "$ZK_DIAG" != 0 ]]; then
   exit 0
 fi
 
-# 連想配列（必ず初期化）
 declare -A ID_MAP=()        # token -> file path
 declare -A STATUS_MAP=()    # file path -> status
 declare -A LINKS_MAP=()     # file path -> "child|child|" or "|" (no-links)
@@ -136,7 +141,6 @@ declare -A PATH_TO_ID=()    # file path -> fid
 declare -A DIRTY=()         # file path -> 1
 
 is_digits() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
-
 now_ts() { date '+%Y%m%d%H%M%S'; }
 
 backup_bad_cache() {
@@ -151,11 +155,14 @@ backup_bad_cache() {
 # scan_file: 1ファイルをAWKで解析（frontmatter + marker + wikilinks）
 # - fenced code block 内は除外
 # - inline code `...` は除外
-# - links ゼロなら "|" を返す（空文字だと壊れキャッシュと区別不能なので）
+# - links ゼロなら "|" を返す
 # 出力: fid<TAB>status<TAB>links
 # ------------------------------------------------------------
 scan_file() {
-  awk -v ic="$ICON_CLOSED" -v io="$ICON_OPEN" -v ifoc="$ICON_FOCUS" -v ib="$ICON_BLOCK" -v ia="$ICON_AWAIT" '
+  awk \
+    -v ic="$ICON_CLOSED" -v io="$ICON_OPEN" \
+    -v iacc="$ICON_ACCEPT" -v irej="$ICON_REJECT" -v isup="$ICON_SUPER" -v idrp="$ICON_DROP" -v iprp="$ICON_PROPOSE" \
+    -v ifoc="$ICON_FOCUS" -v ib="$ICON_BLOCK" -v ia="$ICON_AWAIT" '
   function norm_ws(s){ gsub(/　/, " ", s); return s }
   function trim(s){
     s = norm_ws(s)
@@ -178,6 +185,7 @@ scan_file() {
 
   BEGIN {
     in_fm=0; first=0; fid="none"; closed=0;
+    decision_state=""; allow_marker=1;
     marker=""; marker_text=""; links="";
     in_code=0; fence_ch=""; fence_len=0;
     delete seen
@@ -198,13 +206,32 @@ scan_file() {
     }
     if(in_fm){
       if(t ~ /^---[ \t]*$/){ in_fm=0; next }
+
       if(t ~ /^[ \t]*id:[ \t]*/){
         fid=line
         sub(/^[ \t]*id:[ \t]*/, "", fid)
         fid=trim(fid)
       }
       if(t ~ /^[ \t]*closed:[ \t]*/){ closed=1 }
+
+      if(t ~ /^[ \t]*decision:[ \t]*/){
+        ds=line
+        sub(/^[ \t]*decision:[ \t]*/, "", ds)
+        ds=trim(ds)
+        decision_state=tolower(ds)
+      }
       next
+    }
+
+    # decision が終端状態なら marker は抑制（awaiting残骸で汚れない）
+    if(decision_state!=""){
+      if(decision_state ~ /^(accepted|rejected|superseded|dropped)$/){
+        allow_marker=0
+      } else {
+        allow_marker=1
+      }
+    } else {
+      allow_marker=1
     }
 
     # fenced code skip
@@ -232,8 +259,8 @@ scan_file() {
       }
     }
 
-    # marker
-    if(marker == ""){
+    # marker（許可されている場合のみ）
+    if(allow_marker==1 && marker == ""){
       low=tolower(u)
       if(low ~ /@focus/){
         marker=ifoc
@@ -273,8 +300,20 @@ scan_file() {
     gsub(/\t/, " ", marker_text)
     gsub(/\t/, " ", links)
     gsub(/\n/, " ", links)
-    if(links=="") links="|"   # sentinel: links0
-    printf "%s\t%s\t%s\n", fid, (closed?ic:io) marker marker_text, links
+    if(links=="") links="|"   # sentinel
+
+    base = (closed?ic:io)
+
+    # decision state icon override（closedより視認性優先）
+    if(decision_state!=""){
+      if(decision_state ~ /^accepted$/) base=iacc
+      else if(decision_state ~ /^rejected$/) base=irej
+      else if(decision_state ~ /^superseded$/) base=isup
+      else if(decision_state ~ /^dropped$/) base=idrp
+      else base=iprp   # proposed/その他
+    }
+
+    printf "%s\t%s\t%s\n", fid, base marker marker_text, links
   }' "$1"
 }
 
@@ -296,7 +335,6 @@ if [[ -f "$CACHE_PATH" ]]; then
 
       links="${links//$'\r'/}"
 
-      # links が空文字 or pipe無しは不正扱い（訪問時に復旧）
       if [[ -z "$links" || "$links" != *"|"* ]]; then
         MTIME_MAP["$f_path"]="INVALID"
         STATUS_MAP["$f_path"]="$status"
@@ -322,13 +360,11 @@ else
 fi
 
 # ------------------------------------------------------------
-# 2) ファイル名→パス(ID_MAP)を毎回構築（これが無いと全て⚠️になる）
-#    find がエラーでも黙死しないように stderr を捕まえる
+# 2) ファイル名→パス(ID_MAP)を毎回構築
 # ------------------------------------------------------------
 FIND_ERR="$(mktemp 2>/dev/null || echo "/tmp/zk_find_err.$$")"
 FILE_COUNT=0
 
-# findがexit!=0でも set -e で即死させない（原因は FIND_ERR に残す）
 while IFS= read -r -d '' f; do
   [[ -f "$f" ]] || continue
   name="$(basename "${f%.md}")"
@@ -346,7 +382,7 @@ info "indexed_by_filename count=$FILE_COUNT under ROOT=$ROOT"
 (( FILE_COUNT > 0 )) || die "vault scan returned 0 md files. ROOT is wrong or find failed."
 
 # ------------------------------------------------------------
-# 3) オンデマンドでメタを保証（訪問ノードだけ解析）
+# 3) オンデマンドでメタを保証
 # ------------------------------------------------------------
 ensure_meta() {
   local f="$1"
@@ -361,7 +397,6 @@ ensure_meta() {
     need=1
   fi
 
-  # status/links 未登録も復旧対象
   if (( need == 0 )); then
     [[ -z "${STATUS_MAP["$f"]+x}" ]] && need=1
     [[ -z "${LINKS_MAP["$f"]+x}"  ]] && need=1
@@ -444,7 +479,6 @@ build_tree_safe() {
   local raw_links="${LINKS_MAP["$f_path"]:-}"
   [[ -z "$raw_links" ]] && { dbg "NO_LINKS(meta-missing?) file=$f_path"; return; }
 
-  # "|" sentinel は「リンク0」
   [[ "$raw_links" == "|" ]] && return
 
   local old_ifs="$IFS"
@@ -466,7 +500,7 @@ info "Generating Tree for: $START_KEY"
 build_tree_safe "$START_KEY" 0 ""
 
 # ------------------------------------------------------------
-# 5) キャッシュ保存（オンデマンドで触った分がある or 初回）
+# 5) キャッシュ保存
 # ------------------------------------------------------------
 if (( ${#DIRTY[@]} > 0 )) || (( CACHE_OK == 0 )); then
   info "Saving Cache... touched=${#DIRTY[@]}"
