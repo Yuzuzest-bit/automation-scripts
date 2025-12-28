@@ -6,10 +6,8 @@ set -euo pipefail
 
 TARGET_FILE="${1:-}"
 
-# --- 設定 ---
 VAULT_ROOT="$(pwd -P)"
 
-# 既存アイコン
 ICON_CLOSED="✅ "
 ICON_OPEN="📖 "
 ICON_ERROR="⚠️ "
@@ -48,7 +46,6 @@ resolve_file_path() {
 
 clean_prefix() {
   local s="$1"
-  # 既存の状態アイコンを全部剥がす（再実行で重ならないように）
   for icon in \
     "$ICON_CLOSED" "$ICON_OPEN" "$ICON_ERROR" \
     "$ICON_ACCEPT" "$ICON_REJECT" "$ICON_SUPER" "$ICON_DROP" "$ICON_PROPOSE"
@@ -60,16 +57,17 @@ clean_prefix() {
 
 clean_suffix() {
   local s="$1"
-  # リンク直後の優先度アイコンを除去（🎯(text), 🧱(text), ⏳(text)）
-  echo "$s" | sed -E 's/^[[:space:]]*(🎯|🧱|⏳)\([^)]*\)//'
+  # まず marker を剥がす
+  # 次に superseded矢印注釈を剥がす（何回実行しても増殖しないため）
+  echo "$s" | sed -E \
+    -e 's/^[[:space:]]*(🎯|🧱|⏳)\([^)]*\)//' \
+    -e 's/^[[:space:]]*\(→[^)]*\)//'
 }
 
-# frontmatter から decision: を読む（無ければ空）
+# frontmatter 先頭80行程度から decision: を読む
 get_decision_state() {
   local f_path="$1"
   [[ ! -f "$f_path" ]] && { echo ""; return; }
-  # frontmatter 先頭 80行くらい見れば大抵十分
-  # decision: の値は小文字に正規化して返す
   head -n 80 "$f_path" | tr -d '\r' | awk '
     BEGIN{ inFM=0; started=0 }
     function trim(s){ gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
@@ -87,6 +85,7 @@ get_decision_state() {
         if(t ~ /^decision:[ \t]*/){
           sub(/^decision:[ \t]*/, "", t)
           t=trim(t)
+          out=""
           for(i=1;i<=length(t);i++){
             c=substr(t,i,1)
             if(c>="A" && c<="Z") c=tolower(c)
@@ -99,41 +98,79 @@ get_decision_state() {
     }'
 }
 
+# superseded_by を読む（"xxx.md" 形式の文字列を想定。quoteは剥がす）
+get_superseded_by() {
+  local f_path="$1"
+  [[ ! -f "$f_path" ]] && { echo ""; return; }
+  head -n 120 "$f_path" | tr -d '\r' | awk '
+    BEGIN{ inFM=0; started=0 }
+    function trim(s){ gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    function stripq(s){
+      s=trim(s)
+      gsub(/^"+|"+$/, "", s)
+      gsub(/^\047+|\047+$/, "", s)  # single quote
+      gsub(/^\140+|\140+$/, "", s)  # backtick
+      return s
+    }
+    {
+      line=$0
+      t=line
+      gsub(/^[ \t]+|[ \t]+$/, "", t)
+      if(started==0){
+        if(t=="") next
+        started=1
+        if(t=="---"){ inFM=1; next } else { exit }
+      }
+      if(inFM==1){
+        if(t=="---"){ exit }
+        if(t ~ /^superseded_by:[ \t]*/){
+          sub(/^superseded_by:[ \t]*/, "", t)
+          t=stripq(t)
+          print t
+          exit
+        }
+      }
+    }'
+}
+
 # リンク先の状態を取得（decision優先、次にclosed、最後にopen）
+# 戻り: status|prio|text|arrow
 get_link_info() {
   local f_path="$1"
-  [[ ! -f "$f_path" ]] && { echo "$ICON_ERROR||"; return; }
+  [[ ! -f "$f_path" ]] && { echo "$ICON_ERROR|||"; return; }
 
   local status="$ICON_OPEN"
   local prio=""
   local text=""
+  local arrow=""
   local dstate
 
   dstate="$(get_decision_state "$f_path")"
 
-  # decision状態があればそれを優先して表示
   if [[ -n "$dstate" ]]; then
     case "$dstate" in
       accepted)   status="$ICON_ACCEPT" ;;
       rejected)   status="$ICON_REJECT" ;;
       superseded) status="$ICON_SUPER" ;;
       dropped)    status="$ICON_DROP" ;;
-      *)          status="$ICON_PROPOSE" ;; # proposed/その他
+      *)          status="$ICON_PROPOSE" ;;
     esac
+
+    if [[ "$dstate" == "superseded" ]]; then
+      arrow="$(get_superseded_by "$f_path")"
+    fi
   else
-    # closed判定（decisionが無いノート用）
     if head -n 30 "$f_path" | tr -d '\r' | grep -qE '^closed:[[:space:]]*.+'; then
       status="$ICON_CLOSED"
     fi
   fi
 
-  # decisionが終端状態なら marker は抑制（awaiting残骸で汚れない）
+  # 終端 decision は marker 抑制（ただし superseded の矢印は表示したい）
   if [[ "$dstate" =~ ^(accepted|rejected|superseded|dropped)$ ]]; then
-    printf "%s|%s|%s" "$status" "" ""
+    printf "%s|%s|%s|%s" "$status" "" "" "$arrow"
     return
   fi
 
-  # 優先度とテキスト（awaiting > blocked > focus）
   local match
   match=$(grep -Ei -m1 '@awaiting|@blocked|@focus' "$f_path" | tr -d '\r' || true)
   if [[ -n "$match" ]]; then
@@ -149,7 +186,7 @@ get_link_info() {
     fi
   fi
 
-  printf "%s|%s|%s" "$status" "$prio" "$text"
+  printf "%s|%s|%s|%s" "$status" "$prio" "$text" ""
 }
 
 while IFS= read -r line || [[ -n "$line" ]]; do
@@ -163,9 +200,10 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     resolved_path="$(resolve_file_path "$filename")"
 
     info="$(get_link_info "$resolved_path")"
-    st_icon=$(echo "$info" | cut -d'|' -f1)
-    pr_icon=$(echo "$info" | cut -d'|' -f2)
-    extra_txt=$(echo "$info" | cut -d'|' -f3)
+    st_icon="$(echo "$info" | cut -d'|' -f1)"
+    pr_icon="$(echo "$info" | cut -d'|' -f2)"
+    extra_txt="$(echo "$info" | cut -d'|' -f3)"
+    arrow_txt="$(echo "$info" | cut -d'|' -f4)"
 
     new_prefix="$(clean_prefix "$prefix")"
     new_suffix="$(clean_suffix "$suffix")"
@@ -179,7 +217,12 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       fi
     fi
 
-    echo "${new_prefix}${st_icon}[[${link_target}${link_alias}]]${prio_part}${new_suffix}" >> "$TEMP_FILE"
+    arrow_part=""
+    if [[ -n "$arrow_txt" ]]; then
+      arrow_part=" (→ ${arrow_txt})"
+    fi
+
+    echo "${new_prefix}${st_icon}[[${link_target}${link_alias}]]${prio_part}${arrow_part}${new_suffix}" >> "$TEMP_FILE"
   else
     echo "$line" >> "$TEMP_FILE"
   fi
