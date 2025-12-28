@@ -1,5 +1,5 @@
 {
-  "label": "ZK: New child note (append link)",
+  "label": "note",
   "type": "shell",
   "command": "bash",
   "args": [
@@ -7,10 +7,12 @@
     "${file}",
     "${input:childTitle}",
     "${workspaceFolder}",
-    "${input:childTemplate}"
+    "${input:childTemplate}",
+    "--no-open"
   ],
   "problemMatcher": []
-},
+}
+
 "inputs": [
   {
     "id": "childTitle",
