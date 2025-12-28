@@ -20,11 +20,11 @@ ICON_BLOCK="🧱"
 
 # --- decision state icons (separate layer) ---
 # NOTE: accepted は closed(✅) と被るので、別アイコンに変更
-ICON_ACCEPT="🟢 "
+ICON_ACCEPT="🆗 "
 ICON_REJECT="❌ "
 ICON_SUPER="♻️ "
 ICON_DROP="💤 "
-ICON_PROPOSE="🟡 "
+ICON_PROPOSE="📝 "
 
 if [[ -z "$TARGET_FILE" ]]; then
   echo "usage: $0 <target.md>" >&2
