@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # zk_generate_cached_tree_v7_4_fixed.sh
-# v7.4.6-decision-state
+# v7.4.7-decision-state+superseded_by
 #
 # 目的:
 # - 起点ノートから [[wikilink]] を辿ってツリー表示を生成
 # - キャッシュにより、必要なノードだけオンデマンド解析（vault全体の内容スキャンはしない）
 #
-# 追加(今回):
+# 追加:
 # - frontmatter の decision: を読み取り、Tree表示の状態アイコンを上書き
 #     decision: accepted   -> ✅
 #     decision: rejected   -> ❌
@@ -14,14 +14,10 @@
 #     decision: dropped    -> 💤
 #     decision: proposed/その他 -> 🟡
 # - decision が終端状態(accepted/rejected/superseded/dropped)のときは
-#   @awaiting/@blocked/@focus などのマーカー表示を抑制（待ちが残骸で付いても汚れない）
-#
-# デバッグ:
-#   ZK_DEBUG=1 : 詳細ログ
-#   ZK_DIAG=1  : 診断だけ（ROOT/件数/サンプル一覧を出して終了）
-#
-# 注意:
-# - bash >= 4 必須（連想配列）
+#   @awaiting/@blocked/@focus などのマーカー表示を抑制
+# - decision: superseded のとき、frontmatter の superseded_by を読んで status 末尾に表示:
+#     ♻️ (→ xxx.md)
+#   ※辿らない（ツリー構造は崩さない）
 #
 set -Eeuo pipefail
 export LANG=en_US.UTF-8
@@ -31,9 +27,9 @@ trap 'rc=$?; printf "[ERR] exit=%d line=%d cmd=%s\n" "$rc" "$LINENO" "$BASH_COMM
 OUTDIR_NAME="dashboards"
 FIXED_FILENAME="TREE_VIEW.md"
 
-CACHE_VERSION="v7.4.6"
+CACHE_VERSION="v7.4.7"
 CACHE_FILE=".zk_metadata_cache_${CACHE_VERSION}.tsv"
-CACHE_MAGIC="#ZK_CACHE\tv7.4.6\tcols=5\tlinks=pipe"
+CACHE_MAGIC="#ZK_CACHE\tv7.4.7\tcols=5\tlinks=pipe"
 
 ICON_CLOSED="✅ "; ICON_OPEN="📖 "; ICON_ERROR="⚠️ "
 ICON_FOCUS="🎯 "; ICON_AWAIT="⏳ "; ICON_BLOCK="🧱 "
@@ -49,14 +45,8 @@ ICON_PROPOSE="🟡 "
 ZK_DEBUG="${ZK_DEBUG:-0}"
 ZK_DIAG="${ZK_DIAG:-0}"
 
-dbg() {
-  if [[ "${ZK_DEBUG:-0}" != 0 ]]; then
-    printf '[DBG] %s\n' "$*" >&2
-  fi
-  return 0
-}
-
-info() { printf '[INFO] %s\n' "$*" >&2; return 0; }
+dbg() { if [[ "${ZK_DEBUG:-0}" != 0 ]]; then printf '[DBG] %s\n' "$*" >&2; fi; }
+info() { printf '[INFO] %s\n' "$*" >&2; }
 die()  { printf '[ERR] %s\n' "$*" >&2; exit 1; }
 
 if (( BASH_VERSINFO[0] < 4 )); then
@@ -133,12 +123,12 @@ if [[ "$ZK_DIAG" != 0 ]]; then
   exit 0
 fi
 
-declare -A ID_MAP=()        # token -> file path
-declare -A STATUS_MAP=()    # file path -> status
-declare -A LINKS_MAP=()     # file path -> "child|child|" or "|" (no-links)
-declare -A MTIME_MAP=()     # file path -> mtime or "INVALID"
-declare -A PATH_TO_ID=()    # file path -> fid
-declare -A DIRTY=()         # file path -> 1
+declare -A ID_MAP=()
+declare -A STATUS_MAP=()
+declare -A LINKS_MAP=()
+declare -A MTIME_MAP=()
+declare -A PATH_TO_ID=()
+declare -A DIRTY=()
 
 is_digits() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
 now_ts() { date '+%Y%m%d%H%M%S'; }
@@ -152,10 +142,7 @@ backup_bad_cache() {
 }
 
 # ------------------------------------------------------------
-# scan_file: 1ファイルをAWKで解析（frontmatter + marker + wikilinks）
-# - fenced code block 内は除外
-# - inline code `...` は除外
-# - links ゼロなら "|" を返す
+# scan_file: frontmatter + marker + wikilinks (+ superseded_by)
 # 出力: fid<TAB>status<TAB>links
 # ------------------------------------------------------------
 scan_file() {
@@ -182,10 +169,18 @@ scan_file() {
     return s
   }
   function fence_count(s, c, n){ n=0; while (substr(s, n+1, 1) == c) n++; return n }
+  function strip_quotes(v){
+    v=trim(v)
+    gsub(/^"+|"+$/, "", v)
+    gsub(/^\047+|\047+$/, "", v)   # single quote (octal)
+    gsub(/^\140+|\140+$/, "", v)   # backtick (octal)
+    return v
+  }
 
   BEGIN {
     in_fm=0; first=0; fid="none"; closed=0;
     decision_state=""; allow_marker=1;
+    sup_by="";
     marker=""; marker_text=""; links="";
     in_code=0; fence_ch=""; fence_len=0;
     delete seen
@@ -220,10 +215,17 @@ scan_file() {
         ds=trim(ds)
         decision_state=tolower(ds)
       }
+
+      if(t ~ /^[ \t]*superseded_by:[ \t]*/){
+        v=line
+        sub(/^[ \t]*superseded_by:[ \t]*/, "", v)
+        v=strip_quotes(v)
+        sup_by=v
+      }
       next
     }
 
-    # decision が終端状態なら marker は抑制（awaiting残骸で汚れない）
+    # decision が終端状態なら marker は抑制
     if(decision_state!=""){
       if(decision_state ~ /^(accepted|rejected|superseded|dropped)$/){
         allow_marker=0
@@ -300,20 +302,29 @@ scan_file() {
     gsub(/\t/, " ", marker_text)
     gsub(/\t/, " ", links)
     gsub(/\n/, " ", links)
-    if(links=="") links="|"   # sentinel
+    if(links=="") links="|"
 
     base = (closed?ic:io)
 
-    # decision state icon override（closedより視認性優先）
+    # decision state icon override
     if(decision_state!=""){
       if(decision_state ~ /^accepted$/) base=iacc
       else if(decision_state ~ /^rejected$/) base=irej
       else if(decision_state ~ /^superseded$/) base=isup
       else if(decision_state ~ /^dropped$/) base=idrp
-      else base=iprp   # proposed/その他
+      else base=iprp
     }
 
-    printf "%s\t%s\t%s\n", fid, base marker marker_text, links
+    status_out = base marker marker_text
+
+    # superseded_by note (do not traverse)
+    if(decision_state ~ /^superseded$/ && sup_by!=""){
+      gsub(/\t/, " ", sup_by)
+      gsub(/\n/, " ", sup_by)
+      status_out = status_out " (→ " sup_by ")"
+    }
+
+    printf "%s\t%s\t%s\n", fid, status_out, links
   }' "$1"
 }
 
