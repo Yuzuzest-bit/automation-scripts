@@ -1,0 +1,79 @@
+{
+  "label": "decision: set proposed",
+  "type": "shell",
+  "command": "bash",
+  "args": [
+    "${workspaceFolder}/zk_set_decision_status.sh",
+    "${file}",
+    "proposed"
+  ],
+  "options": { "cwd": "${workspaceFolder}" },
+  "problemMatcher": [],
+  "presentation": { "reveal": "never", "panel": "shared" }
+},
+{
+  "label": "decision: set accepted",
+  "type": "shell",
+  "command": "bash",
+  "args": [
+    "${workspaceFolder}/zk_set_decision_status.sh",
+    "${file}",
+    "accepted",
+    "--review",
+    "${input:decisionReviewNote}"
+  ],
+  "options": { "cwd": "${workspaceFolder}" },
+  "problemMatcher": [],
+  "presentation": { "reveal": "never", "panel": "shared" }
+},
+{
+  "label": "decision: set rejected",
+  "type": "shell",
+  "command": "bash",
+  "args": [
+    "${workspaceFolder}/zk_set_decision_status.sh",
+    "${file}",
+    "rejected",
+    "--review",
+    "${input:decisionReviewNote}",
+    "--reason",
+    "${input:decisionRejectReason}"
+  ],
+  "options": { "cwd": "${workspaceFolder}" },
+  "problemMatcher": [],
+  "presentation": { "reveal": "never", "panel": "shared" }
+},
+{
+  "label": "decision: set superseded",
+  "type": "shell",
+  "command": "bash",
+  "args": [
+    "${workspaceFolder}/zk_set_decision_status.sh",
+    "${file}",
+    "superseded",
+    "--review",
+    "${input:decisionReviewNote}",
+    "--superseded-by",
+    "${input:decisionSupersededBy}"
+  ],
+  "options": { "cwd": "${workspaceFolder}" },
+  "problemMatcher": [],
+  "presentation": { "reveal": "never", "panel": "shared" }
+},
+{
+  "label": "decision: set dropped",
+  "type": "shell",
+  "command": "bash",
+  "args": [
+    "${workspaceFolder}/zk_set_decision_status.sh",
+    "${file}",
+    "dropped",
+    "--review",
+    "${input:decisionReviewNote}",
+    "--reason",
+    "${input:decisionDropReason}"
+  ],
+  "options": { "cwd": "${workspaceFolder}" },
+  "problemMatcher": [],
+  "presentation": { "reveal": "never", "panel": "shared" }
+}
