@@ -8,15 +8,19 @@ TARGET_FILE="${1:-}"
 
 VAULT_ROOT="$(pwd -P)"
 
+# --- lifecycle icons (open/closed/error) ---
 ICON_CLOSED="✅ "
 ICON_OPEN="📖 "
 ICON_ERROR="⚠️ "
+
+# --- markers (suffix) ---
 ICON_FOCUS="🎯"
 ICON_AWAIT="⏳"
 ICON_BLOCK="🧱"
 
-# decision state icons
-ICON_ACCEPT="✅ "
+# --- decision state icons (separate layer) ---
+# NOTE: accepted は closed(✅) と被るので、別アイコンに変更
+ICON_ACCEPT="🟢 "
 ICON_REJECT="❌ "
 ICON_SUPER="♻️ "
 ICON_DROP="💤 "
@@ -44,6 +48,7 @@ resolve_file_path() {
   find "$VAULT_ROOT" -maxdepth 6 -name "$target_name" -not -path "*/.*" -print -quit 2>/dev/null
 }
 
+# 先頭(prefix)から「既存アイコン」を剥がす（何回実行しても増殖しない）
 clean_prefix() {
   local s="$1"
   for icon in \
@@ -55,10 +60,9 @@ clean_prefix() {
   printf '%s' "$s"
 }
 
+# リンク直後(suffix)から marker と (→ xxx) を剥がす
 clean_suffix() {
   local s="$1"
-  # まず marker を剥がす
-  # 次に superseded矢印注釈を剥がす（何回実行しても増殖しないため）
   echo "$s" | sed -E \
     -e 's/^[[:space:]]*(🎯|🧱|⏳)\([^)]*\)//' \
     -e 's/^[[:space:]]*\(→[^)]*\)//'
@@ -98,7 +102,7 @@ get_decision_state() {
     }'
 }
 
-# superseded_by を読む（"xxx.md" 形式の文字列を想定。quoteは剥がす）
+# superseded_by を読む（"xxx.md" 形式の文字列想定。quoteは剥がす）
 get_superseded_by() {
   local f_path="$1"
   [[ ! -f "$f_path" ]] && { echo ""; return; }
@@ -133,44 +137,54 @@ get_superseded_by() {
     }'
 }
 
-# リンク先の状態を取得（decision優先、次にclosed、最後にopen）
-# 戻り: status|prio|text|arrow
+# closed の判定（decisionの有無に関係なく別レイヤで表示）
+has_closed() {
+  local f_path="$1"
+  [[ ! -f "$f_path" ]] && return 1
+  head -n 40 "$f_path" | tr -d '\r' | grep -qE '^closed:[[:space:]]*.+'
+}
+
+# リンク先の状態を取得
+# 戻り: life|decision|prio|text|arrow
 get_link_info() {
   local f_path="$1"
-  [[ ! -f "$f_path" ]] && { echo "$ICON_ERROR|||"; return; }
+  [[ ! -f "$f_path" ]] && { echo "$ICON_ERROR||||"; return; }
 
-  local status="$ICON_OPEN"
+  local life="$ICON_OPEN"
+  local dec=""
   local prio=""
   local text=""
   local arrow=""
-  local dstate
+  local dstate=""
+
+  if has_closed "$f_path"; then
+    life="$ICON_CLOSED"
+  else
+    life="$ICON_OPEN"
+  fi
 
   dstate="$(get_decision_state "$f_path")"
-
   if [[ -n "$dstate" ]]; then
     case "$dstate" in
-      accepted)   status="$ICON_ACCEPT" ;;
-      rejected)   status="$ICON_REJECT" ;;
-      superseded) status="$ICON_SUPER" ;;
-      dropped)    status="$ICON_DROP" ;;
-      *)          status="$ICON_PROPOSE" ;;
+      accepted)   dec="$ICON_ACCEPT" ;;
+      rejected)   dec="$ICON_REJECT" ;;
+      superseded) dec="$ICON_SUPER" ;;
+      dropped)    dec="$ICON_DROP" ;;
+      *)          dec="$ICON_PROPOSE" ;;
     esac
 
     if [[ "$dstate" == "superseded" ]]; then
       arrow="$(get_superseded_by "$f_path")"
     fi
-  else
-    if head -n 30 "$f_path" | tr -d '\r' | grep -qE '^closed:[[:space:]]*.+'; then
-      status="$ICON_CLOSED"
-    fi
   fi
 
-  # 終端 decision は marker 抑制（ただし superseded の矢印は表示したい）
+  # 終端 decision は marker 抑制（ただし superseded の矢印は表示）
   if [[ "$dstate" =~ ^(accepted|rejected|superseded|dropped)$ ]]; then
-    printf "%s|%s|%s|%s" "$status" "" "" "$arrow"
+    printf "%s|%s|%s|%s|%s" "$life" "$dec" "" "" "$arrow"
     return
   fi
 
+  # marker は awaiting > blocked > focus
   local match
   match=$(grep -Ei -m1 '@awaiting|@blocked|@focus' "$f_path" | tr -d '\r' || true)
   if [[ -n "$match" ]]; then
@@ -186,7 +200,7 @@ get_link_info() {
     fi
   fi
 
-  printf "%s|%s|%s|%s" "$status" "$prio" "$text" ""
+  printf "%s|%s|%s|%s|%s" "$life" "$dec" "$prio" "$text" ""
 }
 
 while IFS= read -r line || [[ -n "$line" ]]; do
@@ -200,10 +214,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     resolved_path="$(resolve_file_path "$filename")"
 
     info="$(get_link_info "$resolved_path")"
-    st_icon="$(echo "$info" | cut -d'|' -f1)"
-    pr_icon="$(echo "$info" | cut -d'|' -f2)"
-    extra_txt="$(echo "$info" | cut -d'|' -f3)"
-    arrow_txt="$(echo "$info" | cut -d'|' -f4)"
+    life_icon="$(echo "$info" | cut -d'|' -f1)"
+    dec_icon="$(echo "$info" | cut -d'|' -f2)"
+    pr_icon="$(echo "$info" | cut -d'|' -f3)"
+    extra_txt="$(echo "$info" | cut -d'|' -f4)"
+    arrow_txt="$(echo "$info" | cut -d'|' -f5)"
 
     new_prefix="$(clean_prefix "$prefix")"
     new_suffix="$(clean_suffix "$suffix")"
@@ -222,7 +237,8 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       arrow_part=" (→ ${arrow_txt})"
     fi
 
-    echo "${new_prefix}${st_icon}[[${link_target}${link_alias}]]${prio_part}${arrow_part}${new_suffix}" >> "$TEMP_FILE"
+    # ★ここがポイント：life + decision を並べて表示
+    echo "${new_prefix}${life_icon}${dec_icon}[[${link_target}${link_alias}]]${prio_part}${arrow_part}${new_suffix}" >> "$TEMP_FILE"
   else
     echo "$line" >> "$TEMP_FILE"
   fi
