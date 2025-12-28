@@ -34,11 +34,11 @@ ICON_CYCLE="🔁 (infinite loop) "
 ICON_ALREADY="🔗 (already shown) "
 
 # decision layer (accepted is NOT ✅ to avoid collision with closed)
-ICON_ACCEPT="🟢 "
+ICON_ACCEPT="🆗 "
 ICON_REJECT="❌ "
 ICON_SUPER="♻️ "
 ICON_DROP="💤 "
-ICON_PROPOSE="🟡 "
+ICON_PROPOSE="📝 "
 
 ZK_DEBUG="${ZK_DEBUG:-0}"
 ZK_DIAG="${ZK_DIAG:-0}"
