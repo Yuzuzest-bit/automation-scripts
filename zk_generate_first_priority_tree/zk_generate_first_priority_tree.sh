@@ -1,23 +1,13 @@
 #!/usr/bin/env bash
 # zk_generate_cached_tree_v7_4_fixed.sh
-# v7.4.7-decision-state+superseded_by
+# v7.4.8-decision-layered+superseded_by
 #
-# 目的:
-# - 起点ノートから [[wikilink]] を辿ってツリー表示を生成
-# - キャッシュにより、必要なノードだけオンデマンド解析（vault全体の内容スキャンはしない）
-#
-# 追加:
-# - frontmatter の decision: を読み取り、Tree表示の状態アイコンを上書き
-#     decision: accepted   -> ✅
-#     decision: rejected   -> ❌
-#     decision: superseded -> ♻️
-#     decision: dropped    -> 💤
-#     decision: proposed/その他 -> 🟡
-# - decision が終端状態(accepted/rejected/superseded/dropped)のときは
-#   @awaiting/@blocked/@focus などのマーカー表示を抑制
-# - decision: superseded のとき、frontmatter の superseded_by を読んで status 末尾に表示:
-#     ♻️ (→ xxx.md)
-#   ※辿らない（ツリー構造は崩さない）
+# 追加(今回):
+# - closed/open は従来のまま（✅/📖）
+# - decision は別レイヤとして追加（🟢/♻️/❌/💤/🟡）
+#   → closed と accepted が被らない
+# - decision 終端(accepted/rejected/superseded/dropped)のとき marker は抑制
+# - superseded のとき superseded_by を status 末尾に (→ xxx) 表示（辿らない）
 #
 set -Eeuo pipefail
 export LANG=en_US.UTF-8
@@ -27,16 +17,24 @@ trap 'rc=$?; printf "[ERR] exit=%d line=%d cmd=%s\n" "$rc" "$LINENO" "$BASH_COMM
 OUTDIR_NAME="dashboards"
 FIXED_FILENAME="TREE_VIEW.md"
 
-CACHE_VERSION="v7.4.7"
+CACHE_VERSION="v7.4.8"
 CACHE_FILE=".zk_metadata_cache_${CACHE_VERSION}.tsv"
-CACHE_MAGIC="#ZK_CACHE\tv7.4.7\tcols=5\tlinks=pipe"
+CACHE_MAGIC="#ZK_CACHE\tv7.4.8\tcols=5\tlinks=pipe"
 
-ICON_CLOSED="✅ "; ICON_OPEN="📖 "; ICON_ERROR="⚠️ "
-ICON_FOCUS="🎯 "; ICON_AWAIT="⏳ "; ICON_BLOCK="🧱 "
-ICON_CYCLE="🔁 (infinite loop) "; ICON_ALREADY="🔗 (already shown) "
+# lifecycle
+ICON_CLOSED="✅ "
+ICON_OPEN="📖 "
+ICON_ERROR="⚠️ "
 
-# decision state icons
-ICON_ACCEPT="✅ "
+# markers
+ICON_FOCUS="🎯 "
+ICON_AWAIT="⏳ "
+ICON_BLOCK="🧱 "
+ICON_CYCLE="🔁 (infinite loop) "
+ICON_ALREADY="🔗 (already shown) "
+
+# decision layer (accepted is NOT ✅ to avoid collision with closed)
+ICON_ACCEPT="🟢 "
 ICON_REJECT="❌ "
 ICON_SUPER="♻️ "
 ICON_DROP="💤 "
@@ -45,8 +43,8 @@ ICON_PROPOSE="🟡 "
 ZK_DEBUG="${ZK_DEBUG:-0}"
 ZK_DIAG="${ZK_DIAG:-0}"
 
-dbg() { if [[ "${ZK_DEBUG:-0}" != 0 ]]; then printf '[DBG] %s\n' "$*" >&2; fi; }
-info() { printf '[INFO] %s\n' "$*" >&2; }
+dbg() { if [[ "${ZK_DEBUG:-0}" != 0 ]]; then printf '[DBG] %s\n' "$*" >&2; fi; return 0; }
+info() { printf '[INFO] %s\n' "$*" >&2; return 0; }
 die()  { printf '[ERR] %s\n' "$*" >&2; exit 1; }
 
 if (( BASH_VERSINFO[0] < 4 )); then
@@ -104,15 +102,20 @@ OUTPUT_FILE="${OUTDIR}/${FIXED_FILENAME}"
 CACHE_PATH="${OUTDIR}/${CACHE_FILE}"
 
 OS_NAME="$(uname)"
-STAT_CMD="stat -c %Y"
-[[ "$OS_NAME" == "Darwin" ]] && STAT_CMD="stat -f %m"
+
+# stat コマンドは「配列」で保持（スペース含みの事故防止）
+STAT_CMD=(stat -c %Y)
+if [[ "$OS_NAME" == "Darwin" ]]; then
+  STAT_CMD=(stat -f %m)
+fi
 
 info "TARGET_FILE=$TARGET_FILE"
 info "ROOT=$ROOT (reason=$ROOT_REASON)"
 info "OUTDIR=$OUTDIR"
 info "OUTPUT_FILE=$OUTPUT_FILE"
 info "CACHE_PATH=$CACHE_PATH"
-dbg  "STAT_CMD=$STAT_CMD"
+dbg  "STAT_CMD=${STAT_CMD[*]}"
+
 
 if [[ "$ZK_DIAG" != 0 ]]; then
   cnt="$(find "$ROOT" \( -path "*/.*" \) -prune -o -type f -name "*.md" -print 2>/dev/null | wc -l | tr -d ' ')"
@@ -144,6 +147,7 @@ backup_bad_cache() {
 # ------------------------------------------------------------
 # scan_file: frontmatter + marker + wikilinks (+ superseded_by)
 # 出力: fid<TAB>status<TAB>links
+# status は「life + decision + marker...」の合成
 # ------------------------------------------------------------
 scan_file() {
   awk \
@@ -172,8 +176,8 @@ scan_file() {
   function strip_quotes(v){
     v=trim(v)
     gsub(/^"+|"+$/, "", v)
-    gsub(/^\047+|\047+$/, "", v)   # single quote (octal)
-    gsub(/^\140+|\140+$/, "", v)   # backtick (octal)
+    gsub(/^\047+|\047+$/, "", v)
+    gsub(/^\140+|\140+$/, "", v)
     return v
   }
 
@@ -304,20 +308,21 @@ scan_file() {
     gsub(/\n/, " ", links)
     if(links=="") links="|"
 
-    base = (closed?ic:io)
+    # life icon
+    life = (closed?ic:io)
 
-    # decision state icon override
+    # decision icon (separate layer; no override)
+    dec = ""
     if(decision_state!=""){
-      if(decision_state ~ /^accepted$/) base=iacc
-      else if(decision_state ~ /^rejected$/) base=irej
-      else if(decision_state ~ /^superseded$/) base=isup
-      else if(decision_state ~ /^dropped$/) base=idrp
-      else base=iprp
+      if(decision_state ~ /^accepted$/) dec=iacc
+      else if(decision_state ~ /^rejected$/) dec=irej
+      else if(decision_state ~ /^superseded$/) dec=isup
+      else if(decision_state ~ /^dropped$/) dec=idrp
+      else dec=iprp
     }
 
-    status_out = base marker marker_text
+    status_out = life dec marker marker_text
 
-    # superseded_by note (do not traverse)
     if(decision_state ~ /^superseded$/ && sup_by!=""){
       gsub(/\t/, " ", sup_by)
       gsub(/\n/, " ", sup_by)
@@ -400,7 +405,7 @@ ensure_meta() {
   [[ -f "$f" ]] || return
 
   local cur m_cached need=0
-  cur="$($STAT_CMD "$f" 2>/dev/null || echo 0)"
+  cur="$("${STAT_CMD[@]}" "$f" 2>/dev/null || echo 0)"
   is_digits "$cur" || cur=0
 
   m_cached="${MTIME_MAP["$f"]:-}"
