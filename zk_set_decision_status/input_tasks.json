@@ -1,0 +1,24 @@
+{
+  "id": "decisionReviewNote",
+  "type": "promptString",
+  "description": "Review note base name (without .md). Empty OK.",
+  "default": ""
+},
+{
+  "id": "decisionRejectReason",
+  "type": "promptString",
+  "description": "Rejected reason (short)",
+  "default": "SW制約により不可"
+},
+{
+  "id": "decisionSupersededBy",
+  "type": "promptString",
+  "description": "New decision note base name (without .md)",
+  "default": ""
+},
+{
+  "id": "decisionDropReason",
+  "type": "promptString",
+  "description": "Dropped reason (short)",
+  "default": "要件が撤回された"
+}
