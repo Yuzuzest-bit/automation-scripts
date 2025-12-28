@@ -1,14 +1,58 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PARENT_FILE="${1:-}"
-CHILD_TITLE="${2:-}"
-ROOT="${3:-}"             # ← 互換維持: templates を探す「ボルトのROOT」として扱う
-TEMPLATE_KEY="${4:-task}" # task / review など
+# ------------------------------------------------------------
+# zk_new_child_note.sh
+# - 子ノートをテンプレから作成
+# - 親ノート(frontmatter直下)に [[wikilink]] を挿入
+# - 末尾で子ノートを VS Code で開く(デフォルト)
+#   -> --no-open で抑止可能
+# ------------------------------------------------------------
+
+OPEN_CHILD=1  # 1=open / 0=do not open
+
+usage() {
+  cat >&2 <<'EOF'
+usage:
+  zk_new_child_note.sh [--no-open|--open] <parent-md-file> <child-title> [ROOT_DIR] [TEMPLATE_KEY]
+
+options:
+  --no-open   子ノートを作成しても VS Code で開かない（自動ジャンプ抑止）
+  --open      明示的に開く（デフォルト）
+
+env:
+  ZK_NEW_CHILD_OPEN=0  でも --no-open と同じ効果（task.jsonでenv指定したい場合用）
+EOF
+  exit 2
+}
+
+# env で上書き（task.json の options.env で使える）
+if [[ -n "${ZK_NEW_CHILD_OPEN:-}" ]]; then
+  case "${ZK_NEW_CHILD_OPEN}" in
+    0|false|FALSE|no|NO) OPEN_CHILD=0 ;;
+    1|true|TRUE|yes|YES) OPEN_CHILD=1 ;;
+  esac
+fi
+
+# 引数パース（オプションはどこに置いてもOK）
+pos=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-open) OPEN_CHILD=0 ;;
+    --open)    OPEN_CHILD=1 ;;
+    -h|--help) usage ;;
+    *)         pos+=("$1") ;;
+  esac
+  shift
+done
+
+PARENT_FILE="${pos[0]:-}"
+CHILD_TITLE="${pos[1]:-}"
+ROOT="${pos[2]:-}"
+TEMPLATE_KEY="${pos[3]:-task}"   # task / review など
 
 if [[ -z "$PARENT_FILE" || -z "$CHILD_TITLE" ]]; then
-  echo "usage: $0 <parent-md-file> <child-title> [ROOT_DIR] [TEMPLATE_KEY]" >&2
-  exit 2
+  usage
 fi
 
 to_posix() {
@@ -64,8 +108,7 @@ slugify() {
   local s="$1"
   s="${s// /_}"
   s="$(printf '%s' "$s" | tr -d '\r')"
-  s="$(printf '%s' "$s" | sed -E 's/[^0-9A-Za-zぁ-んァ-ンー一-龠_・-]+/_/g; s/_+/_/g; s/^_+|_+$//g')"
-
+  s="$(printf '%s' "$s" | sed -E 's/[^0-9A-Za-zぁ-んァ-ン一-龠_・-]+/_/g; s/_+/_/g; s/^_+|_+$//g')"
   [[ -n "$s" ]] || s="child"
   printf '%s\n' "$s"
 }
@@ -158,20 +201,13 @@ render_template() {
     "$tmpl_file" > "$out_file"
 }
 
-# ---- main ----
-
 PARENT_FILE="$(to_posix "$PARENT_FILE")"
 [[ -f "$PARENT_FILE" ]] || { echo "[ERR] not found: $PARENT_FILE" >&2; exit 2; }
 
-# 親ノートのディレクトリ（子ノートは必ずここに作る）
-PARENT_DIR="$(cd "$(dirname "$PARENT_FILE")" && pwd)"
-
-# ROOT は「テンプレを探すボルトROOT」として使用（互換維持）
-# 未指定なら従来通り: 親と同じ場所をROOT扱いにする
-if [[ -z "${ROOT}" ]]; then
-  VAULT_ROOT="$PARENT_DIR"
+if [[ -z "$ROOT" ]]; then
+  ROOT="$(cd "$(dirname "$PARENT_FILE")" && pwd)"
 else
-  VAULT_ROOT="$(to_posix "$ROOT")"
+  ROOT="$(to_posix "$ROOT")"
 fi
 
 PARENT_ID="$(get_fm_id "$PARENT_FILE")"
@@ -185,9 +221,7 @@ NOW="$(date '+%Y-%m-%d %H:%M')"
 
 BASE="$(slugify "$CHILD_TITLE")"
 CHILD_BASE="${TODAY_YMD}_${BASE}"
-
-# ★ここが変更点：子は「親と同じフォルダ」
-CHILD_PATH="${PARENT_DIR}/${CHILD_BASE}.md"
+CHILD_PATH="${ROOT}/${CHILD_BASE}.md"
 CHILD_ID="$(date '+%Y%m%d')-${CHILD_BASE}"
 
 if [[ -e "$CHILD_PATH" ]]; then
@@ -195,24 +229,20 @@ if [[ -e "$CHILD_PATH" ]]; then
   exit 1
 fi
 
-# テンプレ選択（VAULT_ROOT/templates/child_<key>.md）
-TEMPL_DIR="${VAULT_ROOT}/templates"
+TEMPL_DIR="${ROOT}/templates"
 TEMPL_FILE="${TEMPL_DIR}/child_${TEMPLATE_KEY}.md"
 
 if [[ ! -f "$TEMPL_FILE" ]]; then
   echo "[ERR] template not found: $TEMPL_FILE" >&2
   echo "[HINT] create templates/child_${TEMPLATE_KEY}.md (e.g. child_task.md, child_review.md)" >&2
-  echo "[HINT] current VAULT_ROOT: $VAULT_ROOT" >&2
   exit 1
 fi
 
 render_template "$TEMPL_FILE" "$CHILD_PATH"
 
-echo "[INFO] created   : $CHILD_PATH"
+echo "[INFO] created: $CHILD_PATH"
 echo "[INFO] parent id : $PARENT_ID"
 echo "[INFO] template  : ${TEMPLATE_KEY}"
-echo "[INFO] parent dir: $PARENT_DIR"
-echo "[INFO] vault root: $VAULT_ROOT"
 
 insert_link_below_frontmatter "$PARENT_FILE" "$CHILD_BASE" || {
   echo "[WARN] could not insert below frontmatter; fallback to append end" >&2
@@ -221,6 +251,11 @@ insert_link_below_frontmatter "$PARENT_FILE" "$CHILD_BASE" || {
 
 clip_set "$PARENT_ID" || true
 
-if command -v code >/dev/null 2>&1; then
-  code -r "$CHILD_PATH" >/dev/null 2>&1 || true
+# VS Codeで子を開く（←ここが「自動ジャンプ」なので抑止可能にする）
+if [[ "$OPEN_CHILD" -eq 1 ]]; then
+  if command -v code >/dev/null 2>&1; then
+    code -r "$CHILD_PATH" >/dev/null 2>&1 || true
+  fi
+else
+  echo "[INFO] --no-open: skip opening in VS Code"
 fi
