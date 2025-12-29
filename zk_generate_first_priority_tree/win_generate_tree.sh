@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 # zk_generate_cached_tree_v7_4_fixed.sh
-# v7.4.9-decision-kind-badge+decision-layered+superseded_by + win-opt-lite(+to_posix)
+# v7.4.10-decision-kind-badge+minutes-kind-badge+decision-layered+superseded_by + win-opt-lite(+to_posix)
+#
+# 仕様:
+# - closed/open は従来のまま（✅/📖）
+# - minutes(tag) ノートは「種別バッジ」🕒 を必ず付与（状態とは別）
+# - decision ノートは「種別バッジ」🗳️ を必ず付与（状態とは別）
+# - decision は別レイヤとして追加（🆗/♻️/❌/💤/📝）
+# - decision 終端(accepted/rejected/superseded/dropped)のとき marker は抑制
+# - superseded のとき superseded_by を status 末尾に (→ xxx) 表示（辿らない）
 #
 # Windows(Git Bash)向け最適化(Lite):
 # - ループ内の basename 外部コマンド起動を廃止（Bash展開へ）
 # - build_tree_safe 内の display_name も basename 廃止（ノード数ぶん効く）
 # - START_KEY も basename 廃止
-# - ★追加: VS Code ${file} が C:\... で来ても動くように to_posix(cygpath) で正規化
+# - VS Code ${file} が C:\... で来ても動くように to_posix(cygpath) で正規化
 #
 set -Eeuo pipefail
 export LANG=en_US.UTF-8
@@ -16,9 +24,9 @@ trap 'rc=$?; printf "[ERR] exit=%d line=%d cmd=%s\n" "$rc" "$LINENO" "$BASH_COMM
 OUTDIR_NAME="dashboards"
 FIXED_FILENAME="TREE_VIEW.md"
 
-CACHE_VERSION="v7.4.9"
+CACHE_VERSION="v7.4.10"
 CACHE_FILE=".zk_metadata_cache_${CACHE_VERSION}.tsv"
-CACHE_MAGIC="#ZK_CACHE\tv7.4.9\tcols=5\tlinks=pipe"
+CACHE_MAGIC="#ZK_CACHE\tv7.4.10\tcols=5\tlinks=pipe"
 
 # lifecycle
 ICON_CLOSED="✅ "
@@ -31,6 +39,9 @@ ICON_AWAIT="⏳ "
 ICON_BLOCK="🧱 "
 ICON_CYCLE="🔁 (infinite loop) "
 ICON_ALREADY="🔗 (already shown) "
+
+# minutes kind badge (always shown when tags include minutes)
+ICON_MINUTES_NOTE="🕒 "
 
 # decision kind badge (always shown when decision: exists)
 ICON_DECISION_NOTE="🗳️ "
@@ -68,7 +79,7 @@ to_posix() {
 TARGET_FILE="${1:-}"
 [[ -z "$TARGET_FILE" ]] && die "Usage: $0 <file.md>"
 
-# ★ WindowsパスをPOSIXへ
+# WindowsパスをPOSIXへ
 TARGET_FILE="$(to_posix "$TARGET_FILE")"
 
 # ここは1回だけの外部コマンドでOK（dirname/cd/pwd）
@@ -110,7 +121,7 @@ detect_root() {
 
 ROOT="$(detect_root)"
 
-# ★外部 basename 廃止（Bash展開）
+# 外部 basename 廃止（Bash展開）
 if [[ "${ROOT##*/}" == "$OUTDIR_NAME" ]]; then
   ROOT_REASON="${ROOT_REASON}+auto_fix_parent"
   ROOT="$(cd "$ROOT/.." && pwd -P)"
@@ -166,11 +177,12 @@ backup_bad_cache() {
 # ------------------------------------------------------------
 # scan_file: frontmatter + marker + wikilinks (+ superseded_by)
 # 出力: fid<TAB>status<TAB>links
-# status は「life + decision_kind + decision_state + marker...」の合成
+# status は「life + minutes_kind + decision_kind + decision_state + marker...」の合成
 # ------------------------------------------------------------
 scan_file() {
   awk \
     -v ic="$ICON_CLOSED" -v io="$ICON_OPEN" \
+    -v imin="$ICON_MINUTES_NOTE" \
     -v idec="$ICON_DECISION_NOTE" \
     -v iacc="$ICON_ACCEPT" -v irej="$ICON_REJECT" -v isup="$ICON_SUPER" -v idrp="$ICON_DROP" -v iprp="$ICON_PROPOSE" \
     -v ifoc="$ICON_FOCUS" -v ib="$ICON_BLOCK" -v ia="$ICON_AWAIT" '
@@ -200,6 +212,15 @@ scan_file() {
     gsub(/^\140+|\140+$/, "", v)
     return v
   }
+  function lower_ascii(s, out, i, c){
+    out=""
+    for(i=1;i<=length(s);i++){
+      c=substr(s,i,1)
+      if(c>="A" && c<="Z") c=tolower(c)
+      out=out c
+    }
+    return out
+  }
 
   BEGIN {
     in_fm=0; first=0; fid="none"; closed=0;
@@ -207,6 +228,11 @@ scan_file() {
     sup_by="";
     marker=""; marker_text=""; links="";
     in_code=0; fence_ch=""; fence_len=0;
+
+    # tags -> minutes
+    in_tags_block=0
+    is_minutes=0
+
     delete seen
   }
 
@@ -246,6 +272,41 @@ scan_file() {
         v=strip_quotes(v)
         sup_by=v
       }
+
+      # ---- tags parsing (minutes detection) ----
+      if(t ~ /^[ \t]*tags:[ \t]*\[/){
+        v=t
+        sub(/^[ \t]*tags:[ \t]*\[/, "", v)
+        sub(/\][ \t]*$/, "", v)
+        n=split(v, arr, ",")
+        for(i=1;i<=n;i++){
+          tag=lower_ascii(strip_quotes(arr[i]))
+          tag=trim(tag)
+          if(tag=="minutes"){ is_minutes=1 }
+        }
+        in_tags_block=0
+      } else if(t ~ /^[ \t]*tags:[ \t]*$/){
+        in_tags_block=1
+      } else if(t ~ /^[ \t]*tags:[ \t]*/){
+        v=t
+        sub(/^[ \t]*tags:[ \t]*/, "", v)
+        tag=lower_ascii(strip_quotes(v))
+        tag=trim(tag)
+        if(tag=="minutes"){ is_minutes=1 }
+        in_tags_block=0
+      } else if(in_tags_block==1){
+        if(t ~ /^[ \t]*-[ \t]*/){
+          v=t
+          sub(/^[ \t]*-[ \t]*/, "", v)
+          tag=lower_ascii(strip_quotes(v))
+          tag=trim(tag)
+          if(tag=="minutes"){ is_minutes=1 }
+        } else if(t ~ /^[A-Za-z0-9_.-]+:[ \t]*/){
+          in_tags_block=0
+        }
+      }
+      # ----------------------------------------
+
       next
     }
 
@@ -328,9 +389,16 @@ scan_file() {
     gsub(/\n/, " ", links)
     if(links=="") links="|"
 
+    # life icon
     life = (closed?ic:io)
-    kind = (decision_state != "" ? idec : "")
 
+    # minutes kind badge
+    mkind = (is_minutes ? imin : "")
+
+    # decision kind badge
+    dkind = (decision_state != "" ? idec : "")
+
+    # decision icon (state)
     dec = ""
     if(decision_state!=""){
       if(decision_state ~ /^accepted$/) dec=iacc
@@ -340,7 +408,7 @@ scan_file() {
       else dec=iprp
     }
 
-    status_out = life kind dec marker marker_text
+    status_out = life mkind dkind dec marker marker_text
 
     if(decision_state ~ /^superseded$/ && sup_by!=""){
       gsub(/\t/, " ", sup_by)
@@ -366,7 +434,7 @@ if [[ -f "$CACHE_PATH" ]]; then
       [[ -f "$f_path" ]] || continue
 
       if [[ -n "${extra:-}" ]]; then MTIME_MAP["$f_path"]="INVALID"; continue; fi
-      if ! [[ "${mtime:-}" =~ ^[0-9]+$ ]]; then MTIME_MAP["$f_path"]="INVALID"; continue; fi
+      if ! is_digits "${mtime:-}"; then MTIME_MAP["$f_path"]="INVALID"; continue; fi
 
       links="${links//$'\r'/}"
 
@@ -426,7 +494,7 @@ ensure_meta() {
 
   local cur m_cached need=0
   cur="$("${STAT_CMD[@]}" "$f" 2>/dev/null || echo 0)"
-  [[ "$cur" =~ ^[0-9]+$ ]] || cur=0
+  is_digits "$cur" || cur=0
 
   m_cached="${MTIME_MAP["$f"]:-}"
   if [[ -z "$m_cached" || "$m_cached" == "INVALID" || "$m_cached" != "$cur" ]]; then
