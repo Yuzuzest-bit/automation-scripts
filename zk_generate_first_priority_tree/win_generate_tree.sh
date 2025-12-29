@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # zk_generate_cached_tree_v7_4_fixed.sh
-# v7.4.9-decision-kind-badge+decision-layered+superseded_by + win-opt-lite
+# v7.4.9-decision-kind-badge+decision-layered+superseded_by + win-opt-lite(+to_posix)
 #
 # Windows(Git Bash)向け最適化(Lite):
-# - ループ内の basename 外部プロセス起動を廃止（Bash展開へ）
+# - ループ内の basename 外部コマンド起動を廃止（Bash展開へ）
 # - build_tree_safe 内の display_name も basename 廃止（ノード数ぶん効く）
 # - START_KEY も basename 廃止
+# - ★追加: VS Code ${file} が C:\... で来ても動くように to_posix(cygpath) で正規化
 #
 set -Eeuo pipefail
 export LANG=en_US.UTF-8
@@ -52,10 +53,25 @@ if (( BASH_VERSINFO[0] < 4 )); then
   die "bash >= 4 required. Use /opt/homebrew/bin/bash (brew bash) or Git Bash."
 fi
 
+to_posix() {
+  local p="$1"
+  # VS Code on Windows often passes "C:\path\to\file.md"
+  if command -v cygpath >/dev/null 2>&1; then
+    if [[ "$p" =~ ^[A-Za-z]:[\\/].* ]] || [[ "$p" == *\\* ]]; then
+      cygpath -u "$p"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$p"
+}
+
 TARGET_FILE="${1:-}"
 [[ -z "$TARGET_FILE" ]] && die "Usage: $0 <file.md>"
 
-# NOTE: ここは1回だけなので basename は残してもいいが、統一してBash展開にする
+# ★ WindowsパスをPOSIXへ
+TARGET_FILE="$(to_posix "$TARGET_FILE")"
+
+# ここは1回だけの外部コマンドでOK（dirname/cd/pwd）
 TARGET_FILE="$(cd "$(dirname "$TARGET_FILE")" && pwd -P)/${TARGET_FILE##*/}"
 [[ -f "$TARGET_FILE" ]] || die "File not found: $TARGET_FILE"
 
@@ -94,7 +110,7 @@ detect_root() {
 
 ROOT="$(detect_root)"
 
-# ★外部 basename 廃止
+# ★外部 basename 廃止（Bash展開）
 if [[ "${ROOT##*/}" == "$OUTDIR_NAME" ]]; then
   ROOT_REASON="${ROOT_REASON}+auto_fix_parent"
   ROOT="$(cd "$ROOT/.." && pwd -P)"
@@ -350,7 +366,7 @@ if [[ -f "$CACHE_PATH" ]]; then
       [[ -f "$f_path" ]] || continue
 
       if [[ -n "${extra:-}" ]]; then MTIME_MAP["$f_path"]="INVALID"; continue; fi
-      if ! is_digits "${mtime:-}"; then MTIME_MAP["$f_path"]="INVALID"; continue; fi
+      if ! [[ "${mtime:-}" =~ ^[0-9]+$ ]]; then MTIME_MAP["$f_path"]="INVALID"; continue; fi
 
       links="${links//$'\r'/}"
 
@@ -386,11 +402,8 @@ FILE_COUNT=0
 
 while IFS= read -r -d '' f; do
   [[ -f "$f" ]] || continue
-
-  # ★外部 basename 廃止（Windowsで効く）
   name="${f##*/}"
   name="${name%.md}"
-
   ID_MAP["$name"]="$f"
   FILE_COUNT=$((FILE_COUNT+1))
 done < <(find "$ROOT" \( -path "*/.*" \) -prune -o -type f -name "*.md" ! -path "$OUTPUT_FILE" -print0 2>"$FIND_ERR" || true)
@@ -413,7 +426,7 @@ ensure_meta() {
 
   local cur m_cached need=0
   cur="$("${STAT_CMD[@]}" "$f" 2>/dev/null || echo 0)"
-  is_digits "$cur" || cur=0
+  [[ "$cur" =~ ^[0-9]+$ ]] || cur=0
 
   m_cached="${MTIME_MAP["$f"]:-}"
   if [[ -z "$m_cached" || "$m_cached" == "INVALID" || "$m_cached" != "$cur" ]]; then
@@ -483,7 +496,6 @@ build_tree_safe() {
   ensure_meta "$f_path"
 
   local display_name status
-  # ★外部 basename 廃止（ノード数ぶん効く）
   display_name="${f_path##*/}"
   display_name="${display_name%.md}"
   status="${STATUS_MAP["$f_path"]:-$ICON_OPEN}"
@@ -503,7 +515,6 @@ build_tree_safe() {
 
   local raw_links="${LINKS_MAP["$f_path"]:-}"
   [[ -z "$raw_links" ]] && { dbg "NO_LINKS(meta-missing?) file=$f_path"; return; }
-
   [[ "$raw_links" == "|" ]] && return
 
   local old_ifs="$IFS"
@@ -520,7 +531,6 @@ build_tree_safe() {
   done
 }
 
-# ★外部 basename 廃止
 START_KEY="${TARGET_FILE##*/}"
 START_KEY="${START_KEY%.md}"
 
