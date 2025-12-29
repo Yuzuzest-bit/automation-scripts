@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# update_in_place.sh (FAST, fixed2 for Git Bash)
+# update_in_place.sh (FAST, fixed2 for Git Bash)  + no process-substitution
 #
 # - Vault全体を最初に一度だけ索引化（1リンクごとの find を撲滅）
 # - リンク先メタは mtime キャッシュ（同一ノートは一度しか解析しない）
 # - VS Code ${file} が C:\... でも to_posix(cygpath) で吸収
+# - Git Bash で落ちやすい「プロセス置換 < <(...)」を廃止（tmp 経由）
 #
 # Optional env:
 #   ZK_DEBUG=1
@@ -126,10 +127,6 @@ PRUNE_DIRS="${ZK_PRUNE_DIRS:-}"
 IFS=',' read -r -a PRUNE_ARR <<< "$PRUNE_DIRS"
 unset IFS
 
-# ★Git Bashで壊れない find 配列の作り方：
-#   - 配列定義の中に “素の )” を入れない
-#   - ')' は FIND_CMD+=(')') のように「別要素でクォートして追加」
-# ★Git Bashで壊れない find 配列の作り方（'(' と ')' は必ずクォート）
 # ★( ) を使わない find（Git Bashで確実に動く）
 FIND_CMD=(find "$VAULT_ROOT" -path "*/.*" -prune -o)
 
@@ -141,9 +138,12 @@ done
 
 FIND_CMD+=(-type f -name "*.md" -print0)
 
-
-
 dbg "Indexing md files..."
+
+# ★Git Bashで落ちやすい「プロセス置換 < <(...)」を廃止（tmp 経由）
+LIST_TMP="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/zk_md_list.$$")"
+"${FIND_CMD[@]}" 2>/dev/null > "$LIST_TMP" || true
+
 FILE_COUNT=0
 while IFS= read -r -d '' f; do
   [[ -f "$f" ]] || continue
@@ -158,7 +158,9 @@ while IFS= read -r -d '' f; do
     FILE_MAP_MD["$base"]="$f"
   fi
   FILE_COUNT=$((FILE_COUNT+1))
-done < <("${FIND_CMD[@]}" 2>/dev/null || true)
+done < "$LIST_TMP"
+
+rm -f "$LIST_TMP" 2>/dev/null || true
 
 (( FILE_COUNT > 0 )) || { echo "[ERR] vault scan returned 0 md files. VAULT_ROOT is wrong?" >&2; exit 1; }
 dbg "Indexed md count=$FILE_COUNT"
