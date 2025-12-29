@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
-# update_in_place.sh (FAST, Git Bash hardening + decision-kind badge + minutes-kind badge)
+# update_in_place.sh (FAST + idempotent, no growth)
 #
-# - Vault全体を最初に一度だけ索引化（1リンクごとの find を撲滅）
-# - リンク先メタは mtime キャッシュ（同一ノートは一度しか解析しない）
-# - VS Code ${file} が C:\... でも to_posix(cygpath) で吸収
-# - 「shで読まれてsyntax error」を潰すため、必ずbashへre-exec
-# - bashの [[ =~ ]] で事故りやすい正規表現は変数に隔離
-# - decision ノートは「種別バッジ」🗳️ を必ず付与（状態とは別）
-# - tags に minutes を含むノートは「種別バッジ」🕒 を必ず付与
-# - 何度実行しても suffix/prefix が増殖しない（置き換え）
+# ポイント:
+# - 1行に複数の [[wikilink]] があっても「左から全部」更新
+# - 各リンクの直前/直後にある“自動装飾”を毎回必ず除去してから付け直す
+#   -> 何回実行しても増殖しない（置換になる）
 #
 # Optional env:
 #   ZK_DEBUG=1
@@ -111,13 +107,8 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
 fi
 
 # -----------------------------
-# 文字列クリーニング（増殖対策・強化版）
-# - prefix: [[ の直前にある「自動付与アイコン」を末尾から全部はがす
-# - suffix: ]] の直後にある「自動付与コメント(⏳/🧱/🎯...)」「(→ ...)」を
-#          先頭から何個でも連続で除去（過去に増殖した分も一掃）
-# - () 内に ')' が含まれても壊れないよう、括弧はバランスで除去
+# 文字列ユーティリティ
 # -----------------------------
-
 ltrim_ws() { # leading whitespace (space/tab + fullwidth space)
   local s="$1"
   while [[ -n "$s" ]]; do
@@ -152,62 +143,69 @@ strip_balanced_parens() {
       fi
     fi
   done
-
-  # unmatched
   printf '%s' ""
 }
 
-clean_prefix() {
+trim_ws_basic() { # trims ASCII space/tab + fullwidth space
   local s="$1"
-  local changed=1
+  # leading
+  s="$(ltrim_ws "$s")"
+  # trailing
+  while [[ -n "$s" ]]; do
+    case "${s: -1}" in
+      ' '|$'\t'|$'\r'|$'\n'|$'\v'|$'\f'|'　')
+        s="${s::-1}"
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+  printf '%s' "$s"
+}
+
+# -----------------------------
+# ここが “増殖しない” の核心
+#  - prefix(リンク直前)から自動アイコンを全部除去（位置がズレてても消す）
+#  - suffix(リンク直後)から自動コメント/矢印を連続除去（何個でも）
+# -----------------------------
+
+clean_prefix_segment() {
+  local s="$1"
   local icon icon2
 
-  # 「prefixの末尾」に付いた自動アイコンだけを剥がす（テキスト中の絵文字は壊しにくい）
-  while (( changed )); do
-    changed=0
-    for icon in \
-      "$ICON_CLOSED" "$ICON_OPEN" "$ICON_ERROR" \
-      "$ICON_MINUTES_NOTE" "$ICON_DECISION_NOTE" \
-      "$ICON_ACCEPT" "$ICON_REJECT" "$ICON_SUPER" "$ICON_DROP" "$ICON_PROPOSE"
-    do
-      # 末尾が "ICON(末尾スペース込み)" なら剥がす
-      if [[ "$s" == *"$icon" ]]; then
-        s="${s%$icon}"
-        changed=1
-      fi
-
-      # 末尾スペースが消えたケースにも対応（ICONの末尾スペース無し版）
-      icon2="${icon% }"
-      if [[ "$icon2" != "$icon" && "$s" == *"$icon2" ]]; then
-        s="${s%$icon2}"
-        changed=1
-      fi
-    done
+  # “リンク直前”に紛れ込んだ自動アイコンを全部消す（乱暴だが確実）
+  for icon in \
+    "$ICON_CLOSED" "$ICON_OPEN" "$ICON_ERROR" \
+    "$ICON_MINUTES_NOTE" "$ICON_DECISION_NOTE" \
+    "$ICON_ACCEPT" "$ICON_REJECT" "$ICON_SUPER" "$ICON_DROP" "$ICON_PROPOSE"
+  do
+    s="${s//$icon/}"
+    icon2="${icon% }"
+    if [[ "$icon2" != "$icon" ]]; then
+      s="${s//$icon2/}"
+    fi
   done
 
   printf '%s' "$s"
 }
 
-clean_suffix() {
+# linkの直後（restの先頭）にある自動装飾だけを食べて、残りを返す
+consume_auto_suffix() {
   local orig="$1"
   local s="$orig"
+  local had_ws=0 removed=0 progressed=0
 
-  local removed=0
-  local progressed=0
-
-  # 元々 ]] の後に空白があった行は、除去後も 1 つ空白を残す（くっつき防止）
-  local orig_had_ws=0
-  case "$orig" in
-    " "*|$'\t'*|'　'*) orig_had_ws=1;;
+  case "$s" in
+    " "*|$'\t'*|'　'*) had_ws=1;;
   esac
 
   s="$(ltrim_ws "$s")"
 
-  # 先頭から「自動付与パーツ」を何個でも連続で剥がす（過去に増殖した分も一掃）
   while :; do
     progressed=0
 
-    # prio: ⏳ / 🧱 / 🎯 (optional "(...)" )
+    # prio: ⏳(...) / 🧱(...) / 🎯(...)
     if [[ "$s" == ⏳* ]]; then
       removed=1; progressed=1
       s="${s#⏳}"; s="$(ltrim_ws "$s")"
@@ -235,14 +233,13 @@ clean_suffix() {
     (( progressed )) || break
   done
 
-  # 残りが空なら suffix は空で返す
   if [[ -z "$s" ]]; then
     printf '%s' ""
     return 0
   fi
 
-  # 元が空白始まりだった or 自動パーツを剥がした → 区切り用に空白1個を付けて返す
-  if (( removed || orig_had_ws )); then
+  # “もともと空白があった” or “自動装飾を剥がした” 場合は、区切りとして1スペースを付ける
+  if (( had_ws || removed )); then
     printf ' %s' "$s"
   else
     printf '%s' "$s"
@@ -259,7 +256,6 @@ PRUNE_DIRS="${ZK_PRUNE_DIRS:-}"
 IFS=',' read -r -a PRUNE_ARR <<< "$PRUNE_DIRS"
 unset IFS
 
-# find は固定（dot dir prune のみ）。追加除外は bash 側で弾く（構文事故を完全回避）
 LIST_TMP="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/zk_md_list.$$")"
 find "$VAULT_ROOT" -path "*/.*" -prune -o -type f -name "*.md" -print0 2>/dev/null > "$LIST_TMP" || true
 
@@ -268,11 +264,10 @@ FILE_COUNT=0
 while IFS= read -r -d '' f; do
   [[ -f "$f" ]] || continue
 
-  # 追加 prune dirs（任意）
   if [[ "${#PRUNE_ARR[@]}" -gt 0 ]]; then
     skip=0
     for d in "${PRUNE_ARR[@]}"; do
-      d="${d#"${d%%[![:space:]]*}"}"; d="${d%"${d##*[![:space:]]}"}"
+      d="$(trim_ws_basic "$d")"
       [[ -z "$d" ]] && continue
       if [[ "$f" == *"/$d/"* ]]; then
         skip=1
@@ -368,7 +363,6 @@ scan_meta() {
     closed=0; decision=""; sup_by="";
     in_code=0; fence_ch=""; fence_len=0;
 
-    # tags
     in_tags_block=0
     is_minutes=0
 
@@ -402,7 +396,6 @@ scan_meta() {
         sup_by=strip_quotes(t)
       }
 
-      # tags parsing (inline list / scalar / block)
       if(t ~ /^tags:[ \t]*\[/){
         v=t
         sub(/^tags:[ \t]*\[/, "", v)
@@ -465,7 +458,6 @@ scan_meta() {
     life = (closed?ic:io)
 
     min = (is_minutes?imin:"")
-
     kind = (decision!="" ? idec : "")
 
     dec=""
@@ -512,7 +504,6 @@ ensure_meta() {
 get_link_info_fast() {
   local f_path="$1"
   if [[ -z "$f_path" || ! -f "$f_path" ]]; then
-    # 7 fields: life, minutes, decisionKind, decisionState, prio, text, arrow
     printf "%s\t\t\t\t\t\t\n" "$ICON_ERROR"
     return 0
   fi
@@ -521,23 +512,55 @@ get_link_info_fast() {
 }
 
 # -----------------------------
-# 3) 本体: 1行ずつ変換
+# 3) 本体: 1行の中の [[...]] を左から全部処理（ここが重要）
 # -----------------------------
-RE_WIKILINK='^(.*)\[\[([^]|]+)(\|[^]]+)?\]\](.*)$'
-
 while IFS= read -r line || [[ -n "$line" ]]; do
-  if [[ $line =~ $RE_WIKILINK ]]; then
-    prefix="${BASH_REMATCH[1]}"
-    link_target="${BASH_REMATCH[2]}"
-    link_alias="${BASH_REMATCH[3]}"
-    suffix="${BASH_REMATCH[4]}"
+  # まず quick check
+  if [[ "$line" != *\[\[* ]]; then
+    printf '%s\n' "$line" >> "$TEMP_FILE"
+    continue
+  fi
 
+  rest="$line"
+  out=""
+
+  # [[...]] を左から順に処理
+  while [[ "$rest" == *\[\[* ]]; do
+    pre="${rest%%\[\[*}"        # first [[ の手前
+    after_open="${rest#*\[\[}"  # first [[ の後ろ
+
+    # 閉じ ]] が無いなら壊さずに終了
+    if [[ "$after_open" != *"]]"* ]]; then
+      out+="$rest"
+      rest=""
+      break
+    fi
+
+    inside="${after_open%%]]*}"     # [[ ... ]] の中身
+    after_close="${after_open#*]]}" # ]] の後ろ
+
+    # このリンクの直後に付いている “自動装飾” を食べて消す（増殖対策）
+    after_close="$(consume_auto_suffix "$after_close")"
+
+    # inside を target / alias に分解（表示は維持）
+    link_target="$inside"
+    link_alias=""
+    if [[ "$inside" == *"|"* ]]; then
+      link_target="${inside%%|*}"
+      link_alias="|${inside#*|}"
+    fi
+
+    # 解決対象は link_target 側（#anchor も含むがファイル解決は # より前）
     target_filepart="${link_target%%#*}"
-    target_filepart="${target_filepart#"${target_filepart%%[!$' \t　']*}"}"
-    target_filepart="${target_filepart%"${target_filepart##*[!$' \t　']}"}"
+    target_filepart="$(trim_ws_basic "$target_filepart")"
+
+    # prefix からは “自動アイコン” を全部消す（乱暴だが確実）
+    pre_clean="$(clean_prefix_segment "$pre")"
 
     if [[ -z "$target_filepart" ]]; then
-      printf '%s\n' "$line" >> "$TEMP_FILE"
+      # 空リンクはそのまま
+      out+="$pre_clean[[${inside}]]"
+      rest="$after_close"
       continue
     fi
 
@@ -553,9 +576,6 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     IFS=$'\t' read -r life_icon minutes_icon kind_icon dec_icon pr_icon extra_txt arrow_txt <<< "$info_line"
     unset IFS
 
-    new_prefix="$(clean_prefix "$prefix")"
-    new_suffix="$(clean_suffix "$suffix")"
-
     prio_part=""
     if [[ -n "${pr_icon:-}" ]]; then
       if [[ -n "${extra_txt:-}" ]]; then
@@ -570,22 +590,16 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       arrow_part=" (→ ${arrow_txt})"
     fi
 
-    # ★life + minutes_kind + decision_kind + decision_state
-    printf '%s%s%s%s%s[[%s%s]]%s%s%s\n' \
-      "$new_prefix" \
-      "${life_icon:-$ICON_OPEN}" \
-      "${minutes_icon:-}" \
-      "${kind_icon:-}" \
-      "${dec_icon:-}" \
-      "$link_target" \
-      "${link_alias:-}" \
-      "$prio_part" \
-      "$arrow_part" \
-      "$new_suffix" \
-      >> "$TEMP_FILE"
-  else
-    printf '%s\n' "$line" >> "$TEMP_FILE"
-  fi
+    # 組み立て（この時点で「過去の装飾」は必ず消えているので増えない）
+    out+="${pre_clean}${life_icon:-$ICON_OPEN}${minutes_icon:-}${kind_icon:-}${dec_icon:-}[[${link_target}${link_alias}]]${prio_part}${arrow_part}"
+
+    # 次のリンクへ
+    rest="$after_close"
+  done
+
+  # 残りを付けて1行完成
+  out+="$rest"
+  printf '%s\n' "$out" >> "$TEMP_FILE"
 done < "$TARGET_FILE"
 
 mv "$TEMP_FILE" "$TARGET_FILE"
