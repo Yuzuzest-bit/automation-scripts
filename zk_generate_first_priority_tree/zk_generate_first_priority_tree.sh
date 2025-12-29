@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # zk_generate_cached_tree_v7_4_fixed.sh
-# v7.4.9-decision-kind-badge+decision-layered+superseded_by
+# v7.4.9-decision-kind-badge+decision-layered+superseded_by + win-speedup(no-basenamespawn)
 #
 # 仕様:
 # - closed/open は従来のまま（✅/📖）
 # - decision は別レイヤとして追加（🆗/♻️/❌/💤/📝）
-#   → closed(✅) と accepted(🆗) が被らない
 # - decision ノートは「種別バッジ」🗳️ を必ず付与（状態とは別）
-#   → highlight は 🗳️ だけを対象にできる
 # - decision 終端(accepted/rejected/superseded/dropped)のとき marker は抑制
 # - superseded のとき superseded_by を status 末尾に (→ xxx) 表示（辿らない）
+#
+# 追加(今回: Windows Git Bash 高速化 その1)
+# - ループ内の basename 外部プロセス起動を廃止（Bashのパラメータ展開で置換）
+#     name="$(basename "${f%.md}")"  ->  name="${f##*/}"; name="${name%.md}"
 #
 set -Eeuo pipefail
 export LANG=en_US.UTF-8
@@ -19,9 +21,6 @@ trap 'rc=$?; printf "[ERR] exit=%d line=%d cmd=%s\n" "$rc" "$LINENO" "$BASH_COMM
 OUTDIR_NAME="dashboards"
 FIXED_FILENAME="TREE_VIEW.md"
 
-# NOTE:
-# - decision kind badge を追加したため、古いキャッシュの status では🗳️が付かない。
-# - そのため CACHE_VERSION を上げてキャッシュを作り直す。
 CACHE_VERSION="v7.4.9"
 CACHE_FILE=".zk_metadata_cache_${CACHE_VERSION}.tsv"
 CACHE_MAGIC="#ZK_CACHE\tv7.4.9\tcols=5\tlinks=pipe"
@@ -51,7 +50,7 @@ ICON_PROPOSE="📝 "
 ZK_DEBUG="${ZK_DEBUG:-0}"
 ZK_DIAG="${ZK_DIAG:-0}"
 
-dbg() { if [[ "${ZK_DEBUG:-0}" != 0 ]]; then printf '[DBG] %s\n' "$*" >&2; fi; return 0; }
+dbg()  { if [[ "${ZK_DEBUG:-0}" != 0 ]]; then printf '[DBG] %s\n' "$*" >&2; fi; return 0; }
 info() { printf '[INFO] %s\n' "$*" >&2; return 0; }
 die()  { printf '[ERR] %s\n' "$*" >&2; exit 1; }
 
@@ -388,13 +387,19 @@ fi
 
 # ------------------------------------------------------------
 # 2) ファイル名→パス(ID_MAP)を毎回構築
+#   ★高速化: basename 外部コマンド起動を廃止
 # ------------------------------------------------------------
 FIND_ERR="$(mktemp 2>/dev/null || echo "/tmp/zk_find_err.$$")"
 FILE_COUNT=0
 
 while IFS= read -r -d '' f; do
   [[ -f "$f" ]] || continue
-  name="$(basename "${f%.md}")"
+
+  # ---- fast: no external basename ----
+  name="${f##*/}"      # path -> filename
+  name="${name%.md}"   # drop extension
+  # -----------------------------------
+
   ID_MAP["$name"]="$f"
   FILE_COUNT=$((FILE_COUNT+1))
 done < <(find "$ROOT" \( -path "*/.*" \) -prune -o -type f -name "*.md" ! -path "$OUTPUT_FILE" -print0 2>"$FIND_ERR" || true)
