@@ -7,21 +7,31 @@ set -euo pipefail
 # - 親ノート(frontmatter直下)に [[wikilink]] を挿入
 # - 末尾で子ノートを VS Code で開く(デフォルト)
 #   -> --no-open で抑止可能
+#
+# 追加:
+#   --same-dir   子ノート作成先を「親ノートと同じフォルダ」にする
+#   --out-dir D  子ノート作成先を明示（相対なら Vault root から）
 # ------------------------------------------------------------
 
 OPEN_CHILD=1  # 1=open / 0=do not open
+SAME_DIR=0
+OUT_DIR=""
 
 usage() {
   cat >&2 <<'EOF'
 usage:
-  zk_new_child_note.sh [--no-open|--open] <parent-md-file> <child-title> [ROOT_DIR] [TEMPLATE_KEY]
+  zk_new_child_note.sh [--no-open|--open] [--same-dir] [--out-dir DIR] <parent-md-file> <child-title> [VAULT_ROOT] [TEMPLATE_KEY]
 
 options:
-  --no-open   子ノートを作成しても VS Code で開かない（自動ジャンプ抑止）
-  --open      明示的に開く（デフォルト）
+  --no-open    子ノートを作成しても VS Code で開かない
+  --open       明示的に開く（デフォルト）
+  --same-dir   子ノートを親ノートと同じフォルダに作成する
+  --out-dir D  子ノート作成先を指定（相対パスなら VAULT_ROOT から）
 
 env:
-  ZK_NEW_CHILD_OPEN=0  でも --no-open と同じ効果（task.jsonでenv指定したい場合用）
+  ZK_NEW_CHILD_OPEN=0           でも --no-open と同じ
+  ZK_NEW_CHILD_SAME_DIR=1       でも --same-dir と同じ
+  ZK_NEW_CHILD_OUT_DIR=path     でも --out-dir と同じ（相対なら VAULT_ROOT から）
 EOF
   exit 2
 }
@@ -33,22 +43,36 @@ if [[ -n "${ZK_NEW_CHILD_OPEN:-}" ]]; then
     1|true|TRUE|yes|YES) OPEN_CHILD=1 ;;
   esac
 fi
+if [[ -n "${ZK_NEW_CHILD_SAME_DIR:-}" ]]; then
+  case "${ZK_NEW_CHILD_SAME_DIR}" in
+    1|true|TRUE|yes|YES) SAME_DIR=1 ;;
+    0|false|FALSE|no|NO) SAME_DIR=0 ;;
+  esac
+fi
+if [[ -n "${ZK_NEW_CHILD_OUT_DIR:-}" ]]; then
+  OUT_DIR="${ZK_NEW_CHILD_OUT_DIR}"
+fi
 
 # 引数パース（オプションはどこに置いてもOK）
 pos=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --no-open) OPEN_CHILD=0 ;;
-    --open)    OPEN_CHILD=1 ;;
+    --no-open)  OPEN_CHILD=0; shift;;
+    --open)     OPEN_CHILD=1; shift;;
+    --same-dir) SAME_DIR=1; shift;;
+    --out-dir)
+      OUT_DIR="${2:-}"
+      [[ -n "$OUT_DIR" ]] || { echo "[ERR] --out-dir requires DIR" >&2; exit 2; }
+      shift 2
+      ;;
     -h|--help) usage ;;
-    *)         pos+=("$1") ;;
+    *) pos+=("$1"); shift;;
   esac
-  shift
 done
 
 PARENT_FILE="${pos[0]:-}"
 CHILD_TITLE="${pos[1]:-}"
-ROOT="${pos[2]:-}"
+VAULT_ROOT_ARG="${pos[2]:-}"
 TEMPLATE_KEY="${pos[3]:-task}"   # task / review など
 
 if [[ -z "$PARENT_FILE" || -z "$CHILD_TITLE" ]]; then
@@ -201,13 +225,53 @@ render_template() {
     "$tmpl_file" > "$out_file"
 }
 
+find_vault_root() {
+  local start="$1"
+  local d="$start"
+  while :; do
+    if [[ -d "$d/.obsidian" ]]; then
+      printf '%s\n' "$d"
+      return 0
+    fi
+    local p
+    p="$(cd "$d/.." && pwd -P)"
+    [[ "$p" == "$d" ]] && break
+    d="$p"
+  done
+  # 見つからない場合は親ノートのフォルダを Vault root 扱い
+  printf '%s\n' "$start"
+}
+
+abs_dir_under_vault() {
+  local d="$1"
+  d="$(to_posix "$d")"
+  if [[ "$d" != /* ]]; then
+    d="${VAULT_ROOT}/${d}"
+  fi
+  mkdir -p "$d"
+  (cd "$d" && pwd -P)
+}
+
+# ---- main ----
 PARENT_FILE="$(to_posix "$PARENT_FILE")"
 [[ -f "$PARENT_FILE" ]] || { echo "[ERR] not found: $PARENT_FILE" >&2; exit 2; }
 
-if [[ -z "$ROOT" ]]; then
-  ROOT="$(cd "$(dirname "$PARENT_FILE")" && pwd)"
+PARENT_DIR="$(cd "$(dirname "$PARENT_FILE")" && pwd -P)"
+
+if [[ -n "$VAULT_ROOT_ARG" ]]; then
+  VAULT_ROOT="$(to_posix "$VAULT_ROOT_ARG")"
+  VAULT_ROOT="$(cd "$VAULT_ROOT" && pwd -P)"
 else
-  ROOT="$(to_posix "$ROOT")"
+  VAULT_ROOT="$(find_vault_root "$PARENT_DIR")"
+fi
+
+# 作成先の決定
+if [[ -n "$OUT_DIR" ]]; then
+  OUT_DIR="$(abs_dir_under_vault "$OUT_DIR")"
+elif [[ "$SAME_DIR" -eq 1 ]]; then
+  OUT_DIR="$PARENT_DIR"
+else
+  OUT_DIR="$VAULT_ROOT"
 fi
 
 PARENT_ID="$(get_fm_id "$PARENT_FILE")"
@@ -221,7 +285,7 @@ NOW="$(date '+%Y-%m-%d %H:%M')"
 
 BASE="$(slugify "$CHILD_TITLE")"
 CHILD_BASE="${TODAY_YMD}_${BASE}"
-CHILD_PATH="${ROOT}/${CHILD_BASE}.md"
+CHILD_PATH="${OUT_DIR}/${CHILD_BASE}.md"
 CHILD_ID="$(date '+%Y%m%d')-${CHILD_BASE}"
 
 if [[ -e "$CHILD_PATH" ]]; then
@@ -229,7 +293,7 @@ if [[ -e "$CHILD_PATH" ]]; then
   exit 1
 fi
 
-TEMPL_DIR="${ROOT}/templates"
+TEMPL_DIR="${VAULT_ROOT}/templates"
 TEMPL_FILE="${TEMPL_DIR}/child_${TEMPLATE_KEY}.md"
 
 if [[ ! -f "$TEMPL_FILE" ]]; then
@@ -240,9 +304,11 @@ fi
 
 render_template "$TEMPL_FILE" "$CHILD_PATH"
 
-echo "[INFO] created: $CHILD_PATH"
-echo "[INFO] parent id : $PARENT_ID"
-echo "[INFO] template  : ${TEMPLATE_KEY}"
+echo "[INFO] created    : $CHILD_PATH"
+echo "[INFO] out dir    : $OUT_DIR"
+echo "[INFO] vault root : $VAULT_ROOT"
+echo "[INFO] parent id  : $PARENT_ID"
+echo "[INFO] template   : ${TEMPLATE_KEY}"
 
 insert_link_below_frontmatter "$PARENT_FILE" "$CHILD_BASE" || {
   echo "[WARN] could not insert below frontmatter; fallback to append end" >&2
@@ -251,7 +317,6 @@ insert_link_below_frontmatter "$PARENT_FILE" "$CHILD_BASE" || {
 
 clip_set "$PARENT_ID" || true
 
-# VS Codeで子を開く（←ここが「自動ジャンプ」なので抑止可能にする）
 if [[ "$OPEN_CHILD" -eq 1 ]]; then
   if command -v code >/dev/null 2>&1; then
     code -r "$CHILD_PATH" >/dev/null 2>&1 || true
