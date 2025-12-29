@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# update_in_place.sh (FAST, Git Bash hardening)
+# update_in_place.sh (FAST, Git Bash hardening + decision-kind badge)
 #
 # - Vault全体を最初に一度だけ索引化（1リンクごとの find を撲滅）
 # - リンク先メタは mtime キャッシュ（同一ノートは一度しか解析しない）
 # - VS Code ${file} が C:\... でも to_posix(cygpath) で吸収
 # - 「shで読まれてsyntax error」を潰すため、必ずbashへre-exec
 # - bashの [[ =~ ]] で事故りやすい正規表現は変数に隔離
+# - decision ノートは「種別バッジ」🗳️ を必ず付与（状態とは別）
 #
 # Optional env:
 #   ZK_DEBUG=1
@@ -30,6 +31,9 @@ ICON_ERROR="⚠️ "
 ICON_FOCUS="🎯"
 ICON_AWAIT="⏳"
 ICON_BLOCK="🧱"
+
+# --- decision kind badge (always when decision: exists) ---
+ICON_DECISION_NOTE="🗳️ "
 
 # --- decision state icons (separate layer) ---
 ICON_ACCEPT="🆗 "
@@ -108,6 +112,7 @@ clean_prefix() {
   local s="$1"
   for icon in \
     "$ICON_CLOSED" "$ICON_OPEN" "$ICON_ERROR" \
+    "$ICON_DECISION_NOTE" \
     "$ICON_ACCEPT" "$ICON_REJECT" "$ICON_SUPER" "$ICON_DROP" "$ICON_PROPOSE"
   do
     s="${s//$icon/}"
@@ -223,12 +228,13 @@ resolve_file_path_fast() {
 # 2) リンク先メタ情報を mtime でキャッシュ
 # -----------------------------
 declare -A META_MTIME=()
-declare -A META_INFO=()  # fpath -> "life<TAB>dec<TAB>prio<TAB>text<TAB>arrow"
+declare -A META_INFO=()  # fpath -> "life<TAB>kind<TAB>dec<TAB>prio<TAB>text<TAB>arrow"
 
 scan_meta() {
   local f_path="$1"
   awk \
     -v ic="$ICON_CLOSED" -v io="$ICON_OPEN" \
+    -v idec="$ICON_DECISION_NOTE" \
     -v iacc="$ICON_ACCEPT" -v irej="$ICON_REJECT" -v isup="$ICON_SUPER" -v idrp="$ICON_DROP" -v iprp="$ICON_PROPOSE" '
   function norm_ws(s){ gsub(/　/, " ", s); return s }
   function trim(s){
@@ -308,6 +314,8 @@ scan_meta() {
   END{
     life = (closed?ic:io)
 
+    kind = (decision!="" ? idec : "")
+
     dec=""
     if(decision!=""){
       if(decision=="accepted") dec=iacc
@@ -330,7 +338,7 @@ scan_meta() {
     gsub(/\t/, " ", text)
     gsub(/\t/, " ", arrow)
 
-    printf "%s\t%s\t%s\t%s\t%s\n", life, dec, prio, text, arrow
+    printf "%s\t%s\t%s\t%s\t%s\t%s\n", life, kind, dec, prio, text, arrow
   }' "$f_path"
 }
 
@@ -352,10 +360,11 @@ ensure_meta() {
 get_link_info_fast() {
   local f_path="$1"
   if [[ -z "$f_path" || ! -f "$f_path" ]]; then
-    printf "%s\t\t\t\t\n" "$ICON_ERROR"
+    # 6 fields: life, kind, dec, prio, text, arrow
+    printf "%s\t\t\t\t\t\n" "$ICON_ERROR"
     return 0
   fi
-  ensure_meta "$f_path" || { printf "%s\t\t\t\t\n" "$ICON_ERROR"; return 0; }
+  ensure_meta "$f_path" || { printf "%s\t\t\t\t\t\n" "$ICON_ERROR"; return 0; }
   printf "%s\n" "${META_INFO["$f_path"]}"
 }
 
@@ -389,7 +398,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     resolved_path="$(resolve_file_path_fast "$filename")"
 
     info_line="$(get_link_info_fast "$resolved_path")"
-    IFS=$'\t' read -r life_icon dec_icon pr_icon extra_txt arrow_txt <<< "$info_line"
+    IFS=$'\t' read -r life_icon kind_icon dec_icon pr_icon extra_txt arrow_txt <<< "$info_line"
     unset IFS
 
     new_prefix="$(clean_prefix "$prefix")"
@@ -409,9 +418,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       arrow_part=" (→ ${arrow_txt})"
     fi
 
-    printf '%s%s%s[[%s%s]]%s%s%s\n' \
+    # ★life + decision_kind + decision_state を並べて表示
+    printf '%s%s%s%s[[%s%s]]%s%s%s\n' \
       "$new_prefix" \
       "${life_icon:-$ICON_OPEN}" \
+      "${kind_icon:-}" \
       "${dec_icon:-}" \
       "$link_target" \
       "${link_alias:-}" \
