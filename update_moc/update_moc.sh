@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 # update_in_place.sh (FAST + idempotent, no growth)
 #
-# ポイント:
-# - 1行に複数の [[wikilink]] があっても「左から全部」更新
-# - 各リンクの直前/直後にある“自動装飾”を毎回必ず除去してから付け直す
-#   -> 何回実行しても増殖しない（置換になる）
-#
 # Optional env:
 #   ZK_DEBUG=1
 #   ZK_TRACE=1
@@ -13,10 +8,8 @@
 #   ZK_PRUNE_DIRS="attachments,exports,archive,node_modules"
 #
 
-# --- if not running under bash, re-exec with bash (POSIX-safe) ---
 [ -n "${BASH_VERSION-}" ] || exec bash "$0" "$@"
 
-# --- locale safety (avoid Unicode substring weirdness on macOS) ---
 if command -v locale >/dev/null 2>&1 && locale -a 2>/dev/null | grep -qi '^c\.utf-8$'; then
   export LC_ALL=C.UTF-8
 elif command -v locale >/dev/null 2>&1 && locale -a 2>/dev/null | grep -qi '^en_us\.utf-8$'; then
@@ -28,41 +21,32 @@ trap 'rc=$?; printf "[ERR] exit=%d line=%d cmd=%s\n" "$rc" "$LINENO" "$BASH_COMM
 
 TARGET_FILE="${1:-}"
 
-# --- lifecycle icons (open/closed/error) ---
 ICON_CLOSED="✅ "
 ICON_OPEN="📖 "
 ICON_ERROR="⚠️ "
 
-# --- markers (suffix) ---
 ICON_FOCUS="🎯"
 ICON_AWAIT="⏳"
 ICON_BLOCK="🧱"
 
-# --- minutes kind badge (always when tags include minutes) ---
 ICON_MINUTES_NOTE="🕒 "
-
-# --- decision kind badge (always when decision: exists) ---
 ICON_DECISION_NOTE="🗳️ "
 
-# --- decision state icons (separate layer) ---
 ICON_ACCEPT="🆗 "
 ICON_REJECT="❌ "
 ICON_SUPER="♻️ "
 ICON_DROP="💤 "
 ICON_PROPOSE="📝 "
 
-# ===== DEBUG/normalize switches =====
-ZK_TRACE="${ZK_TRACE:-0}"          # 1 でデバッグ出力
-ZK_TRACE_MAX="${ZK_TRACE_MAX:-30}" # 出しすぎ防止
+ZK_TRACE="${ZK_TRACE:-0}"
+ZK_TRACE_MAX="${ZK_TRACE_MAX:-30}"
 _trace_n=0
 
-# Variation Selector-16 (emoji presentation)
 VS16=$'\uFE0F'   # "️"
 
-hex_head() { # show first ~48 bytes in hex (for invisible diffs)
+hex_head() {
   printf '%s' "$1" | LC_ALL=C od -An -tx1 -v 2>/dev/null | tr -d ' \n' | cut -c1-96
 }
-
 trace() {
   (( ZK_TRACE )) || return 0
   ((_trace_n++))
@@ -73,7 +57,6 @@ trace() {
 ZK_DEBUG="${ZK_DEBUG:-0}"
 dbg(){ if [[ "${ZK_DEBUG}" != 0 ]]; then printf '[DBG] %s\n' "$*" >&2; fi; }
 
-# bash 4+ required (assoc array)
 if (( BASH_VERSINFO[0] < 4 )); then
   echo "[ERR] bash >= 4 required. Please run with Git Bash / MSYS2 bash 4+." >&2
   exit 2
@@ -95,7 +78,6 @@ to_posix() {
   printf '%s\n' "$p"
 }
 
-# 入力ファイルのパス正規化
 TARGET_FILE="$(to_posix "$TARGET_FILE")"
 TARGET_FILE="$(cd "$(dirname "$TARGET_FILE")" && pwd -P)/${TARGET_FILE##*/}"
 
@@ -107,7 +89,6 @@ fi
 PARENT_DIR="$(cd "$(dirname "$TARGET_FILE")" && pwd -P)"
 TEMP_FILE="$(mktemp)"
 
-# vault root 自動検出（.obsidian/.foam/.git/.vscode を上に辿る）
 detect_root() {
   local d="$PARENT_DIR"
   while :; do
@@ -126,7 +107,6 @@ dbg "TARGET_FILE=$TARGET_FILE"
 dbg "PARENT_DIR=$PARENT_DIR"
 dbg "VAULT_ROOT=$VAULT_ROOT"
 
-# stat (mtime)
 OS_NAME="$(uname)"
 STAT_CMD=(stat -c %Y)
 if [[ "$OS_NAME" == "Darwin" ]]; then
@@ -134,9 +114,9 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
 fi
 
 # -----------------------------
-# 文字列ユーティリティ（substringを避ける）
+# string utils (no ${s:0:1})
 # -----------------------------
-FWSP=$'\u3000'  # 全角スペース
+FWSP=$'\u3000'
 
 ltrim_ws() {
   local s="$1"
@@ -173,7 +153,10 @@ trim_ws_basic() {
   printf '%s' "$s"
 }
 
-# "(...)" / "（...）" を“最初の閉じ括弧まで”で食う（安全・高速）
+# ★ここが今回のエラー対策（trim_ws 未定義を潰す）
+trim_ws() { trim_ws_basic "$1"; }
+
+# "(...)" / "（...）" を最初の閉じ括弧まで食う（安全）
 strip_paren_group_any() {
   local s="$1"
   case "$s" in
@@ -183,9 +166,6 @@ strip_paren_group_any() {
   esac
 }
 
-# -----------------------------
-# prefix: “自動付与アイコン”を確実に削除（VS16有無/末尾スペース有無も両対応）
-# -----------------------------
 clean_prefix_segment() {
   local s="$1"
   local icon icon_no_vs icon_no_vs_nospace icon_nospace
@@ -195,14 +175,11 @@ clean_prefix_segment() {
     "$ICON_MINUTES_NOTE" "$ICON_DECISION_NOTE" \
     "$ICON_ACCEPT" "$ICON_REJECT" "$ICON_SUPER" "$ICON_DROP" "$ICON_PROPOSE"
   do
-    # 1) そのまま
     s="${s//$icon/}"
 
-    # 2) 末尾スペース無し
     icon_nospace="${icon% }"
     [[ "$icon_nospace" != "$icon" ]] && s="${s//$icon_nospace/}"
 
-    # 3) VS16 を落とした版（見た目同じで別文字を潰す）
     icon_no_vs="${icon//$VS16/}"
     [[ "$icon_no_vs" != "$icon" ]] && s="${s//$icon_no_vs/}"
 
@@ -210,14 +187,10 @@ clean_prefix_segment() {
     [[ "$icon_no_vs_nospace" != "$icon_no_vs" ]] && s="${s//$icon_no_vs_nospace/}"
   done
 
-  # 念のため “️”(VS16) 単体が残っても消す（見えないゴミ対策）
   s="${s//$VS16/}"
   printf '%s' "$s"
 }
 
-# -----------------------------
-# suffix: link直後の “自動装飾” を連続で食べ尽くす（全角括弧にも対応）
-# -----------------------------
 consume_auto_suffix() {
   local orig="$1"
   local s="$orig"
@@ -232,39 +205,28 @@ consume_auto_suffix() {
   while :; do
     progressed=0
 
-    # prio marks: ⏳ / 🧱 / 🎯（VS16 “️” 付きも剥がす）
     if [[ "$s" == ⏳* || "$s" == 🧱* || "$s" == 🎯* ]]; then
       removed=1; progressed=1
 
-      if [[ "$s" == ⏳$VS16* ]]; then
-        s="${s#⏳$VS16}"
-      elif [[ "$s" == ⏳* ]]; then
-        s="${s#⏳}"
-      elif [[ "$s" == 🧱$VS16* ]]; then
-        s="${s#🧱$VS16}"
-      elif [[ "$s" == 🧱* ]]; then
-        s="${s#🧱}"
-      elif [[ "$s" == 🎯$VS16* ]]; then
-        s="${s#🎯$VS16}"
-      elif [[ "$s" == 🎯* ]]; then
-        s="${s#🎯}"
+      if [[ "$s" == ⏳$VS16* ]]; then s="${s#⏳$VS16}"
+      elif [[ "$s" == ⏳* ]]; then    s="${s#⏳}"
+      elif [[ "$s" == 🧱$VS16* ]]; then s="${s#🧱$VS16}"
+      elif [[ "$s" == 🧱* ]]; then      s="${s#🧱}"
+      elif [[ "$s" == 🎯$VS16* ]]; then s="${s#🎯$VS16}"
+      elif [[ "$s" == 🎯* ]]; then      s="${s#🎯}"
       fi
 
-      # アイコン直後に VS16 が単独で残るケースも掃除
       while [[ "$s" == "$VS16"* ]]; do
         s="${s#"$VS16"}"
       done
 
       s="$(ltrim_ws "$s")"
-
-      # optional "(...)" or "（...）"
       if [[ "$s" == \(* || "$s" == （* ]]; then
         s="$(strip_paren_group_any "$s")"
       fi
       s="$(ltrim_ws "$s")"
     fi
 
-    # arrow part: (→ ... ) / （→ ...）
     if [[ "$s" == \(→* || "$s" == （→* ]]; then
       removed=1; progressed=1
       s="$(strip_paren_group_any "$s")"
@@ -274,7 +236,6 @@ consume_auto_suffix() {
     (( progressed )) || break
   done
 
-  # debug: “剥がすべきっぽいのに残ってる”を検知
   if (( ZK_TRACE )); then
     local t t2
     t="$(ltrim_ws "$orig")"
@@ -295,7 +256,6 @@ consume_auto_suffix() {
     return 0
   fi
 
-  # もともと空白があった or 何か剥がしたなら区切り空白1個を付ける
   if (( had_ws || removed )); then
     printf ' %s' "$s"
   else
@@ -304,10 +264,10 @@ consume_auto_suffix() {
 }
 
 # -----------------------------
-# 1) Vault内mdを一度だけ索引化（findの多重起動を撲滅）
+# 1) index vault md
 # -----------------------------
-declare -A FILE_MAP=()    # key: basename(no ext) -> fullpath
-declare -A FILE_MAP_MD=() # key: basename(with .md) -> fullpath
+declare -A FILE_MAP=()
+declare -A FILE_MAP_MD=()
 
 PRUNE_DIRS="${ZK_PRUNE_DIRS:-}"
 IFS=',' read -r -a PRUNE_ARR <<< "$PRUNE_DIRS"
@@ -337,12 +297,8 @@ while IFS= read -r -d '' f; do
   base="${f##*/}"
   base_no_ext="${base%.md}"
 
-  if [[ -z "${FILE_MAP["$base_no_ext"]+x}" ]]; then
-    FILE_MAP["$base_no_ext"]="$f"
-  fi
-  if [[ -z "${FILE_MAP_MD["$base"]+x}" ]]; then
-    FILE_MAP_MD["$base"]="$f"
-  fi
+  [[ -z "${FILE_MAP["$base_no_ext"]+x}" ]] && FILE_MAP["$base_no_ext"]="$f"
+  [[ -z "${FILE_MAP_MD["$base"]+x}" ]] && FILE_MAP_MD["$base"]="$f"
   FILE_COUNT=$((FILE_COUNT+1))
 done < "$LIST_TMP"
 
@@ -352,8 +308,7 @@ rm -f "$LIST_TMP" 2>/dev/null || true
 dbg "Indexed md count=$FILE_COUNT"
 
 resolve_file_path_fast() {
-  local filename="$1"  # "xxx.md" or "xxx"
-
+  local filename="$1"
   if [[ -f "$PARENT_DIR/$filename" ]]; then
     printf '%s\n' "$PARENT_DIR/$filename"
     return 0
@@ -376,10 +331,10 @@ resolve_file_path_fast() {
 }
 
 # -----------------------------
-# 2) リンク先メタ情報を mtime でキャッシュ
+# 2) meta cache by mtime
 # -----------------------------
 declare -A META_MTIME=()
-declare -A META_INFO=()  # fpath -> "life<TAB>min<TAB>kind<TAB>dec<TAB>prio<TAB>text<TAB>arrow"
+declare -A META_INFO=()
 
 scan_meta() {
   local f_path="$1"
@@ -569,10 +524,9 @@ get_link_info_fast() {
 }
 
 # -----------------------------
-# 3) 本体: 1行の中の [[...]] を左から全部処理（ここが重要）
+# 3) main
 # -----------------------------
 while IFS= read -r line || [[ -n "$line" ]]; do
-  # まず quick check
   if [[ "$line" != *\[\[* ]]; then
     printf '%s\n' "$line" >> "$TEMP_FILE"
     continue
@@ -581,25 +535,21 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   rest="$line"
   out=""
 
-  # [[...]] を左から順に処理
   while [[ "$rest" == *\[\[* ]]; do
-    pre="${rest%%\[\[*}"        # first [[ の手前
-    after_open="${rest#*\[\[}"  # first [[ の後ろ
+    pre="${rest%%\[\[*}"
+    after_open="${rest#*\[\[}"
 
-    # 閉じ ]] が無いなら壊さずに終了
     if [[ "$after_open" != *"]]"* ]]; then
       out+="$rest"
       rest=""
       break
     fi
 
-    inside="${after_open%%]]*}"     # [[ ... ]] の中身
-    after_close="${after_open#*]]}" # ]] の後ろ
+    inside="${after_open%%]]*}"
+    after_close="${after_open#*]]}"
 
-    # このリンクの直後に付いている “自動装飾” を食べて消す（増殖対策）
     after_close="$(consume_auto_suffix "$after_close")"
 
-    # inside を target / alias に分解（表示は維持）
     link_target="$inside"
     link_alias=""
     if [[ "$inside" == *"|"* ]]; then
@@ -607,15 +557,12 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       link_alias="|${inside#*|}"
     fi
 
-    # 解決対象は link_target 側（#anchor も含むがファイル解決は # より前）
     target_filepart="${link_target%%#*}"
     target_filepart="$(trim_ws_basic "$target_filepart")"
 
-    # prefix からは “自動アイコン” を全部消す（乱暴だが確実）
     pre_clean="$(clean_prefix_segment "$pre")"
 
     if [[ -z "$target_filepart" ]]; then
-      # 空リンクはそのまま
       out+="$pre_clean[[${inside}]]"
       rest="$after_close"
       continue
@@ -647,16 +594,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       arrow_part=" (→ ${arrow_txt})"
     fi
 
-    # 組み立て（この時点で「過去の装飾」は必ず消えているので増えない）
     out+="${pre_clean}${life_icon:-$ICON_OPEN}${minutes_icon:-}${kind_icon:-}${dec_icon:-}[[${link_target}${link_alias}]]${prio_part}${arrow_part}"
-
-    # 次のリンクへ
     rest="$after_close"
   done
 
-  # 残りを付けて1行完成
   out+="$rest"
-
   if (( ZK_TRACE )); then
     if [[ "$line" != "$out" ]]; then
       trace "LINE changed"
@@ -664,7 +606,6 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       trace "  OUT: $out"
     fi
   fi
-
   printf '%s\n' "$out" >> "$TEMP_FILE"
 done < "$TARGET_FILE"
 
