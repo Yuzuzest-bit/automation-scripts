@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# update_in_place.sh (FAST, Git Bash hardening + decision-kind badge)
+# update_in_place.sh (FAST, Git Bash hardening + decision-kind badge + minutes-kind badge)
 #
 # - Vault全体を最初に一度だけ索引化（1リンクごとの find を撲滅）
 # - リンク先メタは mtime キャッシュ（同一ノートは一度しか解析しない）
@@ -7,6 +7,7 @@
 # - 「shで読まれてsyntax error」を潰すため、必ずbashへre-exec
 # - bashの [[ =~ ]] で事故りやすい正規表現は変数に隔離
 # - decision ノートは「種別バッジ」🗳️ を必ず付与（状態とは別）
+# - tags に minutes を含むノートは「種別バッジ」🕒 を必ず付与
 #
 # Optional env:
 #   ZK_DEBUG=1
@@ -31,6 +32,9 @@ ICON_ERROR="⚠️ "
 ICON_FOCUS="🎯"
 ICON_AWAIT="⏳"
 ICON_BLOCK="🧱"
+
+# --- minutes kind badge (always when tags include minutes) ---
+ICON_MINUTES_NOTE="🕒 "
 
 # --- decision kind badge (always when decision: exists) ---
 ICON_DECISION_NOTE="🗳️ "
@@ -112,6 +116,7 @@ clean_prefix() {
   local s="$1"
   for icon in \
     "$ICON_CLOSED" "$ICON_OPEN" "$ICON_ERROR" \
+    "$ICON_MINUTES_NOTE" \
     "$ICON_DECISION_NOTE" \
     "$ICON_ACCEPT" "$ICON_REJECT" "$ICON_SUPER" "$ICON_DROP" "$ICON_PROPOSE"
   do
@@ -228,12 +233,13 @@ resolve_file_path_fast() {
 # 2) リンク先メタ情報を mtime でキャッシュ
 # -----------------------------
 declare -A META_MTIME=()
-declare -A META_INFO=()  # fpath -> "life<TAB>kind<TAB>dec<TAB>prio<TAB>text<TAB>arrow"
+declare -A META_INFO=()  # fpath -> "life<TAB>min<TAB>kind<TAB>dec<TAB>prio<TAB>text<TAB>arrow"
 
 scan_meta() {
   local f_path="$1"
   awk \
     -v ic="$ICON_CLOSED" -v io="$ICON_OPEN" \
+    -v imin="$ICON_MINUTES_NOTE" \
     -v idec="$ICON_DECISION_NOTE" \
     -v iacc="$ICON_ACCEPT" -v irej="$ICON_REJECT" -v isup="$ICON_SUPER" -v idrp="$ICON_DROP" -v iprp="$ICON_PROPOSE" '
   function norm_ws(s){ gsub(/　/, " ", s); return s }
@@ -252,12 +258,26 @@ scan_meta() {
     return v
   }
   function fence_count(s, c, n){ n=0; while (substr(s, n+1, 1) == c) n++; return n }
+  function tolower_ascii(s, out, i, c){
+    out=""
+    for(i=1;i<=length(s);i++){
+      c=substr(s,i,1)
+      if(c>="A" && c<="Z") c=tolower(c)
+      out=out c
+    }
+    return out
+  }
 
   BEGIN{
     IGNORECASE=1
     in_fm=0; first=0;
     closed=0; decision=""; sup_by="";
     in_code=0; fence_ch=""; fence_len=0;
+
+    # tags
+    in_tags_block=0
+    is_minutes=0
+
     a_txt=""; b_txt=""; f_txt="";
   }
 
@@ -272,17 +292,53 @@ scan_meta() {
       first=1
       if(t ~ /^---[ \t]*$/){ in_fm=1; next }
     }
+
     if(in_fm){
       if(t ~ /^---[ \t]*$/){ in_fm=0; next }
+
       if(t ~ /^closed:[ \t]*/){ closed=1 }
+
       if(t ~ /^decision:[ \t]*/){
         sub(/^decision:[ \t]*/, "", t)
-        decision=tolower(trim(t))
+        decision=tolower_ascii(trim(t))
       }
+
       if(t ~ /^superseded_by:[ \t]*/){
         sub(/^superseded_by:[ \t]*/, "", t)
         sup_by=strip_quotes(t)
       }
+
+      # tags parsing (inline list / scalar / block)
+      if(t ~ /^tags:[ \t]*\[/){
+        v=t
+        sub(/^tags:[ \t]*\[/, "", v)
+        sub(/\][ \t]*$/, "", v)
+        n=split(v, arr, ",")
+        for(i=1;i<=n;i++){
+          tag=strip_quotes(arr[i])
+          tag=tolower_ascii(trim(tag))
+          if(tag=="minutes"){ is_minutes=1 }
+        }
+        in_tags_block=0
+      } else if(t ~ /^tags:[ \t]*$/){
+        in_tags_block=1
+      } else if(t ~ /^tags:[ \t]*/){
+        v=t
+        sub(/^tags:[ \t]*/, "", v)
+        tag=tolower_ascii(strip_quotes(v))
+        if(tag=="minutes"){ is_minutes=1 }
+        in_tags_block=0
+      } else if(in_tags_block==1){
+        if(t ~ /^-[ \t]*/){
+          v=t
+          sub(/^-+[ \t]*/, "", v)
+          tag=tolower_ascii(strip_quotes(v))
+          if(tag=="minutes"){ is_minutes=1 }
+        } else if(t ~ /^[A-Za-z0-9_.-]+:[ \t]*/){
+          in_tags_block=0
+        }
+      }
+
       next
     }
 
@@ -314,6 +370,8 @@ scan_meta() {
   END{
     life = (closed?ic:io)
 
+    min = (is_minutes?imin:"")
+
     kind = (decision!="" ? idec : "")
 
     dec=""
@@ -338,7 +396,7 @@ scan_meta() {
     gsub(/\t/, " ", text)
     gsub(/\t/, " ", arrow)
 
-    printf "%s\t%s\t%s\t%s\t%s\t%s\n", life, kind, dec, prio, text, arrow
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", life, min, kind, dec, prio, text, arrow
   }' "$f_path"
 }
 
@@ -360,11 +418,11 @@ ensure_meta() {
 get_link_info_fast() {
   local f_path="$1"
   if [[ -z "$f_path" || ! -f "$f_path" ]]; then
-    # 6 fields: life, kind, dec, prio, text, arrow
-    printf "%s\t\t\t\t\t\n" "$ICON_ERROR"
+    # 7 fields: life, minutes, decisionKind, decisionState, prio, text, arrow
+    printf "%s\t\t\t\t\t\t\n" "$ICON_ERROR"
     return 0
   fi
-  ensure_meta "$f_path" || { printf "%s\t\t\t\t\t\n" "$ICON_ERROR"; return 0; }
+  ensure_meta "$f_path" || { printf "%s\t\t\t\t\t\t\n" "$ICON_ERROR"; return 0; }
   printf "%s\n" "${META_INFO["$f_path"]}"
 }
 
@@ -398,7 +456,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     resolved_path="$(resolve_file_path_fast "$filename")"
 
     info_line="$(get_link_info_fast "$resolved_path")"
-    IFS=$'\t' read -r life_icon kind_icon dec_icon pr_icon extra_txt arrow_txt <<< "$info_line"
+    IFS=$'\t' read -r life_icon minutes_icon kind_icon dec_icon pr_icon extra_txt arrow_txt <<< "$info_line"
     unset IFS
 
     new_prefix="$(clean_prefix "$prefix")"
@@ -418,10 +476,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       arrow_part=" (→ ${arrow_txt})"
     fi
 
-    # ★life + decision_kind + decision_state を並べて表示
-    printf '%s%s%s%s[[%s%s]]%s%s%s\n' \
+    # ★life + minutes_kind + decision_kind + decision_state
+    printf '%s%s%s%s%s[[%s%s]]%s%s%s\n' \
       "$new_prefix" \
       "${life_icon:-$ICON_OPEN}" \
+      "${minutes_icon:-}" \
       "${kind_icon:-}" \
       "${dec_icon:-}" \
       "$link_target" \
