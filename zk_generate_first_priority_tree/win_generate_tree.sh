@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # zk_generate_cached_tree_v7_4_fixed.sh
-# v7.4.9-decision-kind-badge+decision-layered+superseded_by + win-optimized
+# v7.4.9-decision-kind-badge+decision-layered+superseded_by + win-opt-lite
 #
-# Windows(Git Bash)向け最適化:
-# - ループ内の外部コマンド起動を排除（basename等）
-# - TREE出力を「文字列連結」ではなく「配列にpush」して最後にまとめて出力
-# - indent生成をprintf(bash builtin)で高速化
+# Windows(Git Bash)向け最適化(Lite):
+# - ループ内の basename 外部プロセス起動を廃止（Bash展開へ）
+# - build_tree_safe 内の display_name も basename 廃止（ノード数ぶん効く）
+# - START_KEY も basename 廃止
 #
 set -Eeuo pipefail
 export LANG=en_US.UTF-8
@@ -44,7 +44,7 @@ ICON_PROPOSE="📝 "
 ZK_DEBUG="${ZK_DEBUG:-0}"
 ZK_DIAG="${ZK_DIAG:-0}"
 
-dbg()  { if [[ "${ZK_DEBUG:-0}" != 0 ]]; then printf '[DBG] %s\n' "$*" >&2; fi; return 0; }
+dbg() { if [[ "${ZK_DEBUG:-0}" != 0 ]]; then printf '[DBG] %s\n' "$*" >&2; fi; return 0; }
 info() { printf '[INFO] %s\n' "$*" >&2; return 0; }
 die()  { printf '[ERR] %s\n' "$*" >&2; exit 1; }
 
@@ -54,7 +54,9 @@ fi
 
 TARGET_FILE="${1:-}"
 [[ -z "$TARGET_FILE" ]] && die "Usage: $0 <file.md>"
-TARGET_FILE="$(cd "$(dirname "$TARGET_FILE")" && pwd -P)/$(basename "$TARGET_FILE")"
+
+# NOTE: ここは1回だけなので basename は残してもいいが、統一してBash展開にする
+TARGET_FILE="$(cd "$(dirname "$TARGET_FILE")" && pwd -P)/${TARGET_FILE##*/}"
 [[ -f "$TARGET_FILE" ]] || die "File not found: $TARGET_FILE"
 
 ROOT_REASON=""
@@ -92,9 +94,8 @@ detect_root() {
 
 ROOT="$(detect_root)"
 
-# basename外部コマンドを避ける（ここは1回だけなので影響小だが、ついでに）
-root_base="${ROOT##*/}"
-if [[ "$root_base" == "$OUTDIR_NAME" ]]; then
+# ★外部 basename 廃止
+if [[ "${ROOT##*/}" == "$OUTDIR_NAME" ]]; then
   ROOT_REASON="${ROOT_REASON}+auto_fix_parent"
   ROOT="$(cd "$ROOT/.." && pwd -P)"
 fi
@@ -144,14 +145,6 @@ backup_bad_cache() {
   local dst="${src}.bak.$(now_ts)"
   mv -f "$src" "$dst"
   info "cache invalid -> moved to: $dst"
-}
-
-# パスから「ファイル名(拡張子なし)」を得る（外部コマンドなし）
-path_key_no_ext() {
-  local p="$1"
-  p="${p##*/}"
-  p="${p%.md}"
-  printf '%s' "$p"
 }
 
 # ------------------------------------------------------------
@@ -393,7 +386,11 @@ FILE_COUNT=0
 
 while IFS= read -r -d '' f; do
   [[ -f "$f" ]] || continue
-  name="$(path_key_no_ext "$f")"
+
+  # ★外部 basename 廃止（Windowsで効く）
+  name="${f##*/}"
+  name="${name%.md}"
+
   ID_MAP["$name"]="$f"
   FILE_COUNT=$((FILE_COUNT+1))
 done < <(find "$ROOT" \( -path "*/.*" \) -prune -o -type f -name "*.md" ! -path "$OUTPUT_FILE" -print0 2>"$FIND_ERR" || true)
@@ -445,10 +442,10 @@ ensure_meta() {
 }
 
 # ------------------------------------------------------------
-# 4) ツリー構築（出力は配列にpush）
+# 4) ツリー構築
 # ------------------------------------------------------------
 declare -A visited_global=()
-declare -a TREE_LINES=()
+TREE_CONTENT=""
 
 normalize_token() {
   local s="$1"
@@ -466,20 +463,19 @@ normalize_token() {
 
 build_tree_safe() {
   local target="$1" depth="$2" stack="$3"
-  local indent
-  # printf は bash builtin（高速）
-  printf -v indent '%*s' $((depth * 2)) ''
+  local indent="" i
+  for ((i=0; i<depth; i++)); do indent+="  "; done
 
   target="$(normalize_token "$target")"
   if [[ -z "$target" ]]; then
-    TREE_LINES+=("${indent}- [[UNKNOWN]] ${ICON_ERROR}")
+    TREE_CONTENT+="${indent}- [[UNKNOWN]] ${ICON_ERROR}\n"
     dbg "MISS token(empty) depth=$depth"
     return
   fi
 
   local f_path="${ID_MAP["$target"]:-}"
   if [[ -z "$f_path" || ! -f "$f_path" ]]; then
-    TREE_LINES+=("${indent}- [[${target}]] ${ICON_ERROR}")
+    TREE_CONTENT+="${indent}- [[${target}]] ${ICON_ERROR}\n"
     dbg "MISS token=$target (not found in ID_MAP)"
     return
   fi
@@ -487,24 +483,27 @@ build_tree_safe() {
   ensure_meta "$f_path"
 
   local display_name status
-  display_name="$(path_key_no_ext "$f_path")"
+  # ★外部 basename 廃止（ノード数ぶん効く）
+  display_name="${f_path##*/}"
+  display_name="${display_name%.md}"
   status="${STATUS_MAP["$f_path"]:-$ICON_OPEN}"
 
   if [[ "$stack" == *"[${f_path}]"* ]]; then
-    TREE_LINES+=("${indent}- [[${display_name}]] ${status}${ICON_CYCLE}")
+    TREE_CONTENT+="${indent}- [[${display_name}]] ${status}${ICON_CYCLE}\n"
     dbg "CYCLE file=$f_path"
     return
   fi
   if [[ -n "${visited_global["$f_path"]:-}" ]]; then
-    TREE_LINES+=("${indent}- [[${display_name}]] ${status}${ICON_ALREADY}")
+    TREE_CONTENT+="${indent}- [[${display_name}]] ${status}${ICON_ALREADY}\n"
     return
   fi
 
   visited_global["$f_path"]=1
-  TREE_LINES+=("${indent}- [[${display_name}]] ${status}")
+  TREE_CONTENT+="${indent}- [[${display_name}]] ${status}\n"
 
   local raw_links="${LINKS_MAP["$f_path"]:-}"
   [[ -z "$raw_links" ]] && { dbg "NO_LINKS(meta-missing?) file=$f_path"; return; }
+
   [[ "$raw_links" == "|" ]] && return
 
   local old_ifs="$IFS"
@@ -521,7 +520,10 @@ build_tree_safe() {
   done
 }
 
-START_KEY="$(path_key_no_ext "$TARGET_FILE")"
+# ★外部 basename 廃止
+START_KEY="${TARGET_FILE##*/}"
+START_KEY="${START_KEY%.md}"
+
 info "Generating Tree for: $START_KEY"
 build_tree_safe "$START_KEY" 0 ""
 
@@ -563,11 +565,11 @@ fi
   echo "---"
   echo "id: $(date '+%Y%m%d%H%M')-TREE-VIEW"
   echo "tags: [system, zk-archive]"
-  echo "title: Status Tree - [[${START_KEY}]]"
+  echo "title: Status Tree - $START_KEY"
   echo "closed: $(date '+%Y-%m-%dT%H:%M:%S')"
   echo "---"
   echo "# 🌲 High-Speed Tree View: [[${START_KEY}]]"
-  printf "%s\n" "${TREE_LINES[@]}"
+  echo -e "$TREE_CONTENT"
 } > "$OUTPUT_FILE"
 
 info "[OK] saved to $OUTPUT_FILE"
