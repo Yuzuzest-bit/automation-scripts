@@ -129,13 +129,18 @@ unset IFS
 # ★Git Bashで壊れない find 配列の作り方：
 #   - 配列定義の中に “素の )” を入れない
 #   - ')' は FIND_CMD+=(')') のように「別要素でクォートして追加」
-FIND_CMD=(find "$VAULT_ROOT" '(' -path "*/.*")
+# ★Git Bashで壊れない find 配列の作り方（'(' と ')' は必ずクォート）
+FIND_CMD=(find "$VAULT_ROOT")
+FIND_CMD+=('(' -path "*/.*")
+
 for d in "${PRUNE_ARR[@]}"; do
   d="${d#"${d%%[![:space:]]*}"}"; d="${d%"${d##*[![:space:]]}"}"
   [[ -z "$d" ]] && continue
   FIND_CMD+=(-o -path "*/$d/*")
 done
+
 FIND_CMD+=(')' -prune -o -type f -name "*.md" -print0)
+
 
 dbg "Indexing md files..."
 FILE_COUNT=0
