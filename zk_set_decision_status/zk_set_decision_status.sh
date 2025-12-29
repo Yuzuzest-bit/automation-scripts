@@ -7,15 +7,32 @@
 # - それ以外なら closed: を付与/更新（デフォルト: now）
 # - オプション: rejected_reason, superseded_by, review
 #
+# NOTE:
+# - superseded_by / review は [[wikilink]] を付けない（文字列として保存）
+# - 既存が [[...]] 形式なら、実行時に可能な範囲で「...」に正規化する
+#
 # usage:
-#   zk_set_decision_status.sh <decision.md> <status> [--reason "text"] [--superseded-by "NoteBase"] [--review "NoteBase"] [--closed "YYYY-MM-DDTHH:MM:SS"]
+#   zk_set_decision_status.sh <decision.md> <status> \
+#     [--reason "text"] [--superseded-by "NoteBase"] [--review "NoteBase"] \
+#     [--closed "YYYY-MM-DDTHH:MM:SS"]
 #
 set -euo pipefail
-export LANG=en_US.UTF-8
+
+# --- locale (Mac/Linuxで極力UTF-8寄せ) ---
+set_locale() {
+  local cand
+  for cand in C.UTF-8 en_US.UTF-8 C; do
+    if locale -a 2>/dev/null | tr -d '\r' | grep -qx "$cand"; then
+      export LC_ALL="$cand"
+      return
+    fi
+  done
+}
+set_locale || true
 
 FILE="${1:-}"
 STATUS="${2:-}"
-shift $(( $#>0 ? 2 : 0 )) || true
+shift $(( $#>=2 ? 2 : $# )) || true
 
 if [[ -z "${FILE}" || -z "${STATUS}" ]]; then
   echo "usage: $0 <decision.md> <status> [--reason \"text\"] [--superseded-by \"NoteBase\"] [--review \"NoteBase\"] [--closed \"YYYY-MM-DDTHH:MM:SS\"]" >&2
@@ -62,13 +79,35 @@ if [[ -z "$CLOSED_AT" ]]; then
   CLOSED_AT="$(date '+%Y-%m-%dT%H:%M:%S')"
 fi
 
-yaml_quote() {
-  # YAML用にダブルクオートで囲んで最低限エスケープ
-  # " -> \"  , CRは除去
-  local s="${1//$'\r'/}"
-  s="${s//\"/\\\"}"
-  printf "\"%s\"" "$s"
+# --- 入力側で [[...]] を渡されても剥がす（保険） ---
+trim_ws() {
+  local s="$1"
+  # remove CR
+  s="${s//$'\r'/}"
+  # trim
+  s="${s#"${s%%[!$' \t\n']*}"}"
+  s="${s%"${s##*[!$' \t\n']}"}"
+  printf '%s' "$s"
 }
+
+normalize_ref() {
+  local s
+  s="$(trim_ws "${1:-}")"
+  [[ -z "$s" ]] && { printf '%s' ""; return; }
+  # strip surrounding quotes if user passed them
+  if [[ "$s" == \"*\" && "$s" == *\" ]]; then
+    s="${s#\"}"; s="${s%\"}"
+  fi
+  # strip [[...]]
+  if [[ "$s" == \[\[*\]\] ]]; then
+    s="${s#\[\[}"; s="${s%\]\]}"
+  fi
+  s="$(trim_ws "$s")"
+  printf '%s' "$s"
+}
+
+SUPERSEDED_BY="$(normalize_ref "$SUPERSEDED_BY")"
+REVIEW="$(normalize_ref "$REVIEW")"
 
 TMP="$(mktemp)"
 
@@ -81,11 +120,26 @@ function trim(s){ gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
 function yamlq(s,  t){
   t=s
   gsub(/\r/, "", t)
+  gsub(/\\/,"\\\\", t)
   gsub(/"/, "\\\"", t)
   return "\"" t "\""
 }
+function val_after_colon(line, v){
+  v=line
+  sub(/^[^:]*:[ \t]*/, "", v)
+  return v
+}
+function strip_wikilink(v, u){
+  u=trim(v)
+  # drop outer quotes if any
+  if (u ~ /^".*"$/) u=substr(u, 2, length(u)-2)
+  u=trim(u)
+  # strip [[...]] only when it clearly matches
+  if (u ~ /^\[\[.*\]\]$/) u=substr(u, 3, length(u)-4)
+  return trim(u)
+}
 BEGIN{
-  started=0; inFM=0; fmDone=0;
+  started=0; inFM=0;
   seen_decision=0; seen_closed=0;
   seen_reason=0; seen_sup=0; seen_review=0;
 }
@@ -99,19 +153,15 @@ BEGIN{
     if(t==""){ print $0; next }
     started=1
     if(t=="---"){ inFM=1; print $0; next }
-    # frontmatter無しは非対応（あなたのノート前提では基本ある）
     print "[ERR] frontmatter not found at top of file" > "/dev/stderr"
     exit 3
   }
 
   if(inFM==1){
-    # 終端
     if(t=="---"){
-      # decision
       if(seen_decision==0){
         print "decision: " st
       }
-      # closed
       if(st=="proposed"){
         # proposed は closed を付けない
       } else {
@@ -119,39 +169,40 @@ BEGIN{
           print "closed: " closed_at
         }
       }
-      # optional keys
+
       if(reason!="" && (st=="rejected" || st=="dropped")){
         if(seen_reason==0){
           print "rejected_reason: " yamlq(reason)
         }
       }
+
+      # superseded_by: [[...]] を作らない
       if(superseded_by!="" && st=="superseded"){
         if(seen_sup==0){
-          print "superseded_by: " yamlq("[[" superseded_by "]]")
-        }
-      }
-      if(review!=""){
-        if(seen_review==0){
-          print "review: " yamlq("[[" review "]]")
+          print "superseded_by: " yamlq(superseded_by)
         }
       }
 
-      inFM=0; fmDone=1
+      # review: [[...]] を作らない
+      if(review!=""){
+        if(seen_review==0){
+          print "review: " yamlq(review)
+        }
+      }
+
+      inFM=0
       print $0
       next
     }
 
-    # decision:
     if(t ~ /^decision:[ \t]*/){
       print "decision: " st
       seen_decision=1
       next
     }
 
-    # closed:
     if(t ~ /^closed:[ \t]*/){
       if(st=="proposed"){
-        # proposed -> closed行は削除
         seen_closed=1
         next
       } else {
@@ -161,46 +212,54 @@ BEGIN{
       }
     }
 
-    # rejected_reason:
     if(t ~ /^rejected_reason:[ \t]*/){
       if(reason!="" && (st=="rejected" || st=="dropped")){
         print "rejected_reason: " yamlq(reason)
       } else {
-        # reason指定が無い/対象外ならそのまま残す
         print $0
       }
       seen_reason=1
       next
     }
 
-    # superseded_by:
+    # superseded_by: 既存が [[...]] っぽければ剥がして正規化（それ以外は基本維持）
     if(t ~ /^superseded_by:[ \t]*/){
       if(superseded_by!="" && st=="superseded"){
-        print "superseded_by: " yamlq("[[" superseded_by "]]")
+        print "superseded_by: " yamlq(superseded_by)
       } else {
-        print $0
+        v = val_after_colon(line)
+        sv = strip_wikilink(v)
+        if (sv != trim(v)) {
+          print "superseded_by: " yamlq(sv)
+        } else {
+          print $0
+        }
       }
       seen_sup=1
       next
     }
 
-    # review:
+    # review: 既存が [[...]] っぽければ剥がして正規化（それ以外は基本維持）
     if(t ~ /^review:[ \t]*/){
       if(review!=""){
-        print "review: " yamlq("[[" review "]]")
+        print "review: " yamlq(review)
       } else {
-        print $0
+        v = val_after_colon(line)
+        sv = strip_wikilink(v)
+        if (sv != trim(v)) {
+          print "review: " yamlq(sv)
+        } else {
+          print $0
+        }
       }
       seen_review=1
       next
     }
 
-    # その他frontmatterはそのまま
     print $0
     next
   }
 
-  # 本文はそのまま
   print $0
 }
 ' "$FILE" > "$TMP" || {
@@ -209,5 +268,8 @@ BEGIN{
   exit "$rc"
 }
 
-mv "$TMP" "$FILE"
+# パーミッション等を変えないため「中身だけ」上書き
+cat "$TMP" > "$FILE"
+rm -f "$TMP"
+
 echo "[OK] updated decision status: $STATUS_LC -> $FILE"
