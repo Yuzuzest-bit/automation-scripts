@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # zk_generate_cached_tree_v7_4_fixed.sh
-# v7.4.8-decision-layered+superseded_by
+# v7.4.9-decision-kind-badge+decision-layered+superseded_by
 #
-# 追加(今回):
+# 仕様:
 # - closed/open は従来のまま（✅/📖）
-# - decision は別レイヤとして追加（🟢/♻️/❌/💤/🟡）
-#   → closed と accepted が被らない
+# - decision は別レイヤとして追加（🆗/♻️/❌/💤/📝）
+#   → closed(✅) と accepted(🆗) が被らない
+# - decision ノートは「種別バッジ」🗳️ を必ず付与（状態とは別）
+#   → highlight は 🗳️ だけを対象にできる
 # - decision 終端(accepted/rejected/superseded/dropped)のとき marker は抑制
 # - superseded のとき superseded_by を status 末尾に (→ xxx) 表示（辿らない）
 #
@@ -17,9 +19,12 @@ trap 'rc=$?; printf "[ERR] exit=%d line=%d cmd=%s\n" "$rc" "$LINENO" "$BASH_COMM
 OUTDIR_NAME="dashboards"
 FIXED_FILENAME="TREE_VIEW.md"
 
-CACHE_VERSION="v7.4.8"
+# NOTE:
+# - decision kind badge を追加したため、古いキャッシュの status では🗳️が付かない。
+# - そのため CACHE_VERSION を上げてキャッシュを作り直す。
+CACHE_VERSION="v7.4.9"
 CACHE_FILE=".zk_metadata_cache_${CACHE_VERSION}.tsv"
-CACHE_MAGIC="#ZK_CACHE\tv7.4.8\tcols=5\tlinks=pipe"
+CACHE_MAGIC="#ZK_CACHE\tv7.4.9\tcols=5\tlinks=pipe"
 
 # lifecycle
 ICON_CLOSED="✅ "
@@ -32,6 +37,9 @@ ICON_AWAIT="⏳ "
 ICON_BLOCK="🧱 "
 ICON_CYCLE="🔁 (infinite loop) "
 ICON_ALREADY="🔗 (already shown) "
+
+# decision kind badge (always shown when decision: exists)
+ICON_DECISION_NOTE="🗳️ "
 
 # decision layer (accepted is NOT ✅ to avoid collision with closed)
 ICON_ACCEPT="🆗 "
@@ -116,7 +124,6 @@ info "OUTPUT_FILE=$OUTPUT_FILE"
 info "CACHE_PATH=$CACHE_PATH"
 dbg  "STAT_CMD=${STAT_CMD[*]}"
 
-
 if [[ "$ZK_DIAG" != 0 ]]; then
   cnt="$(find "$ROOT" \( -path "*/.*" \) -prune -o -type f -name "*.md" -print 2>/dev/null | wc -l | tr -d ' ')"
   info "DIAG md_count_under_ROOT=$cnt"
@@ -147,11 +154,12 @@ backup_bad_cache() {
 # ------------------------------------------------------------
 # scan_file: frontmatter + marker + wikilinks (+ superseded_by)
 # 出力: fid<TAB>status<TAB>links
-# status は「life + decision + marker...」の合成
+# status は「life + decision_kind + decision_state + marker...」の合成
 # ------------------------------------------------------------
 scan_file() {
   awk \
     -v ic="$ICON_CLOSED" -v io="$ICON_OPEN" \
+    -v idec="$ICON_DECISION_NOTE" \
     -v iacc="$ICON_ACCEPT" -v irej="$ICON_REJECT" -v isup="$ICON_SUPER" -v idrp="$ICON_DROP" -v iprp="$ICON_PROPOSE" \
     -v ifoc="$ICON_FOCUS" -v ib="$ICON_BLOCK" -v ia="$ICON_AWAIT" '
   function norm_ws(s){ gsub(/　/, " ", s); return s }
@@ -311,7 +319,10 @@ scan_file() {
     # life icon
     life = (closed?ic:io)
 
-    # decision icon (separate layer; no override)
+    # decision kind badge (always when decision exists)
+    kind = (decision_state != "" ? idec : "")
+
+    # decision icon (state)
     dec = ""
     if(decision_state!=""){
       if(decision_state ~ /^accepted$/) dec=iacc
@@ -321,7 +332,7 @@ scan_file() {
       else dec=iprp
     }
 
-    status_out = life dec marker marker_text
+    status_out = life kind dec marker marker_text
 
     if(decision_state ~ /^superseded$/ && sup_by!=""){
       gsub(/\t/, " ", sup_by)
