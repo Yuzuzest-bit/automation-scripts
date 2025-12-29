@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
-# update_in_place.sh (FAST)
+# update_in_place.sh (FAST, fixed)
 #
 # Windows(Git Bash)で遅い原因を潰す版:
 # - 1リンクごとに find/head/grep/sed/awk/cut を起動しない
 # - Vault全体を最初に一度だけ索引化（basename等も外部コマンド廃止）
-# - リンク先ファイルの状態は mtime でキャッシュ（同じノートは一度しか解析しない）
+# - リンク先メタ情報は mtime でキャッシュ（同じノートは一度しか解析しない）
 # - VS Code ${file} が C:\... で来ても to_posix(cygpath) で吸収
 #
-# 使い方:
-#   ./update_in_place.sh <target.md>
-#
 # Optional env:
-#   ZK_DEBUG=1        デバッグログ
-#   ZK_PRUNE_DIRS     追加で find から除外するディレクトリ名(カンマ区切り)
-#                    例: ZK_PRUNE_DIRS="attachments,exports,archive,node_modules"
+#   ZK_DEBUG=1
+#   ZK_PRUNE_DIRS="attachments,exports,archive,node_modules"
 #
 export LC_ALL=C.UTF-8
 set -Eeuo pipefail
@@ -32,7 +28,6 @@ ICON_AWAIT="⏳"
 ICON_BLOCK="🧱"
 
 # --- decision state icons (separate layer) ---
-# NOTE: accepted は closed(✅) と被るので、別アイコン
 ICON_ACCEPT="🆗 "
 ICON_REJECT="❌ "
 ICON_SUPER="♻️ "
@@ -97,7 +92,7 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
 fi
 
 # -----------------------------
-# 文字列クリーニング
+# 文字列クリーニング（外部 sed なし）
 # -----------------------------
 clean_prefix() {
   local s="$1"
@@ -110,7 +105,6 @@ clean_prefix() {
   printf '%s' "$s"
 }
 
-# suffix の先頭から marker と (→ xxx) を剥がす（外部 sed なし）
 clean_suffix() {
   local s="$1"
   # 先頭: (🎯|🧱|⏳)(...)
@@ -125,25 +119,24 @@ clean_suffix() {
 }
 
 # -----------------------------
-# 1) まず Vault 内の md を一度だけ索引化（リンク解決の find を撲滅）
+# 1) Vault内mdを一度だけ索引化（findの多重起動を撲滅）
 # -----------------------------
-declare -A FILE_MAP=()   # key: basename(no ext) -> fullpath
-declare -A FILE_MAP_MD=()# key: basename(with .md) -> fullpath (念のため)
+declare -A FILE_MAP=()    # key: basename(no ext) -> fullpath
+declare -A FILE_MAP_MD=() # key: basename(with .md) -> fullpath
 
-# 追加除外（ディレクトリ名カンマ区切り）
-# 例: ZK_PRUNE_DIRS="attachments,exports,archive,node_modules"
 PRUNE_DIRS="${ZK_PRUNE_DIRS:-}"
 IFS=',' read -r -a PRUNE_ARR <<< "$PRUNE_DIRS"
 unset IFS
 
-# find コマンド組み立て（隠しディレクトリは常に prune）
-FIND_CMD=(find "$VAULT_ROOT" \( -path "*/.*" )
+# ★ここが構文エラーの原因だったので修正：
+#    '\(' '\)' ではなく、find の括弧トークンを '(', ')' として配列要素に入れる
+FIND_CMD=(find "$VAULT_ROOT" '(' -path "*/.*" )
 for d in "${PRUNE_ARR[@]}"; do
   d="${d#"${d%%[![:space:]]*}"}"; d="${d%"${d##*[![:space:]]}"}"
   [[ -z "$d" ]] && continue
   FIND_CMD+=( -o -path "*/$d/*" )
 done
-FIND_CMD+=( \) -prune -o -type f -name "*.md" -print0)
+FIND_CMD+=( ')' -prune -o -type f -name "*.md" -print0 )
 
 dbg "Indexing md files..."
 FILE_COUNT=0
@@ -152,14 +145,13 @@ while IFS= read -r -d '' f; do
   base="${f##*/}"
   base_no_ext="${base%.md}"
 
-  # 競合があっても「最初に見つかったもの」を優先（元の find -quit と同じく曖昧解決）
+  # 競合があっても最初に見つかったものを優先（元の find -quit と同じ曖昧解決）
   if [[ -z "${FILE_MAP["$base_no_ext"]+x}" ]]; then
     FILE_MAP["$base_no_ext"]="$f"
   fi
   if [[ -z "${FILE_MAP_MD["$base"]+x}" ]]; then
     FILE_MAP_MD["$base"]="$f"
   fi
-
   FILE_COUNT=$((FILE_COUNT+1))
 done < <("${FIND_CMD[@]}" 2>/dev/null || true)
 
@@ -168,12 +160,11 @@ dbg "Indexed md count=$FILE_COUNT"
 
 resolve_file_path_fast() {
   local filename="$1"  # "xxx.md" or "xxx"
-  # まず同じフォルダ優先（元の挙動維持）
   if [[ -f "$PARENT_DIR/$filename" ]]; then
     printf '%s\n' "$PARENT_DIR/$filename"
     return 0
   fi
-  # .md あり/なし 両対応
+
   if [[ "$filename" == *.md ]]; then
     local p="${FILE_MAP_MD["$filename"]:-}"
     [[ -n "$p" ]] && { printf '%s\n' "$p"; return 0; }
@@ -186,18 +177,18 @@ resolve_file_path_fast() {
     p="${FILE_MAP_MD["$filename.md"]:-}"
     [[ -n "$p" ]] && { printf '%s\n' "$p"; return 0; }
   fi
-  printf '%s\n' ""  # not found
+
+  printf '%s\n' ""
 }
 
 # -----------------------------
-# 2) リンク先メタ情報を mtime でキャッシュ（head/grep/awk を一度だけ）
+# 2) リンク先メタ情報を mtime でキャッシュ
 # -----------------------------
 declare -A META_MTIME=()
 declare -A META_INFO=()  # fpath -> "life<TAB>dec<TAB>prio<TAB>text<TAB>arrow"
 
 scan_meta() {
   local f_path="$1"
-  # 出力: life<TAB>dec<TAB>prio<TAB>text<TAB>arrow
   awk \
     -v ic="$ICON_CLOSED" -v io="$ICON_OPEN" \
     -v iacc="$ICON_ACCEPT" -v irej="$ICON_REJECT" -v isup="$ICON_SUPER" -v idrp="$ICON_DROP" -v iprp="$ICON_PROPOSE" '
@@ -219,6 +210,7 @@ scan_meta() {
   function fence_count(s, c, n){ n=0; while (substr(s, n+1, 1) == c) n++; return n }
 
   BEGIN{
+    IGNORECASE=1
     in_fm=0; first=0;
     closed=0; decision=""; sup_by="";
     in_code=0; fence_ch=""; fence_len=0;
@@ -254,8 +246,7 @@ scan_meta() {
     }
 
     # fenced code skip
-    u=line
-    gsub(/^[ \t]+|[ \t]+$/, "", u)
+    u=trim(line)
     if(in_code){
       c=substr(u,1,1)
       if(c==fence_ch){
@@ -278,20 +269,19 @@ scan_meta() {
 
     low=tolower(line)
 
-    # marker text は「初出」を保持し、最後に awaiting > blocked > focus で選ぶ
     if(a_txt=="" && low ~ /@awaiting/){
       a_txt=line
-      sub(/.*@awaiting[[:space:]]*/i, "", a_txt)
+      sub(/.*@awaiting[[:space:]]*/, "", a_txt)
       a_txt=trim(a_txt)
     }
     if(b_txt=="" && low ~ /@blocked/){
       b_txt=line
-      sub(/.*@blocked[[:space:]]*/i, "", b_txt)
+      sub(/.*@blocked[[:space:]]*/, "", b_txt)
       b_txt=trim(b_txt)
     }
     if(f_txt=="" && low ~ /@focus/){
       f_txt=line
-      sub(/.*@focus[[:space:]]*/i, "", f_txt)
+      sub(/.*@focus[[:space:]]*/, "", f_txt)
       f_txt=trim(f_txt)
     }
   }
@@ -308,7 +298,6 @@ scan_meta() {
       else dec=iprp
     }
 
-    # decision 終端なら marker 抑制（ただし superseded の矢印は別）
     prio=""; text=""
     if(!(decision ~ /^(accepted|rejected|superseded|dropped)$/)){
       if(a_txt!=""){ prio="⏳"; text=a_txt }
@@ -337,7 +326,6 @@ ensure_meta() {
   [[ "$cur" =~ ^[0-9]+$ ]] || cur=0
 
   if [[ "${META_MTIME["$f_path"]:-}" != "$cur" ]]; then
-    dbg "scan_meta: $f_path"
     META_INFO["$f_path"]="$(scan_meta "$f_path")"
     META_MTIME["$f_path"]="$cur"
   fi
@@ -355,7 +343,7 @@ get_link_info_fast() {
 }
 
 # -----------------------------
-# 3) 本体: 1行ずつ変換（外部 cut/echo/sed を排除）
+# 3) 本体: 1行ずつ変換
 # -----------------------------
 while IFS= read -r line || [[ -n "$line" ]]; do
   if [[ "$line" =~ (.*)\[\[([^]|]+)(\|[^]]+)?\]\](.*) ]]; then
@@ -364,7 +352,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     link_alias="${BASH_REMATCH[3]}"
     suffix="${BASH_REMATCH[4]}"
 
-    # [[Note#Heading]] の #以降はファイル解決に使わない
+    # [[Note#Heading]] の # 以降は解決に使わない
     target_filepart="${link_target%%#*}"
     target_filepart="${target_filepart#"${target_filepart%%[!$' \t　']*}"}"
     target_filepart="${target_filepart%"${target_filepart##*[!$' \t　']}"}"
@@ -403,7 +391,6 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       arrow_part=" (→ ${arrow_txt})"
     fi
 
-    # life + decision を並べて表示
     printf '%s%s%s[[%s%s]]%s%s%s\n' \
       "$new_prefix" \
       "${life_icon:-$ICON_OPEN}" \
