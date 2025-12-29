@@ -1,578 +1,261 @@
 #!/usr/bin/env bash
-# zk_generate_cached_tree_v7_4_fixed.sh
-# v7.4.9-decision-kind-badge+decision-layered+superseded_by
-#
-# 仕様:
-# - closed/open は従来のまま（✅/📖）
-# - decision は別レイヤとして追加（🆗/♻️/❌/💤/📝）
-#   → closed(✅) と accepted(🆗) が被らない
-# - decision ノートは「種別バッジ」🗳️ を必ず付与（状態とは別）
-#   → highlight は 🗳️ だけを対象にできる
-# - decision 終端(accepted/rejected/superseded/dropped)のとき marker は抑制
-# - superseded のとき superseded_by を status 末尾に (→ xxx) 表示（辿らない）
-#
-set -Eeuo pipefail
-export LANG=en_US.UTF-8
+set -euo pipefail
 
-trap 'rc=$?; printf "[ERR] exit=%d line=%d cmd=%s\n" "$rc" "$LINENO" "$BASH_COMMAND" >&2' ERR
+# ------------------------------------------------------------
+# zk_new_child_note.sh
+# - 子ノートをテンプレから作成
+# - 親ノート(frontmatter直下)に [[wikilink]] を挿入
+# - 末尾で子ノートを VS Code で開く(デフォルト)
+#   -> --no-open で抑止可能
+# ------------------------------------------------------------
 
-OUTDIR_NAME="dashboards"
-FIXED_FILENAME="TREE_VIEW.md"
+OPEN_CHILD=1  # 1=open / 0=do not open
 
-# NOTE:
-# - decision kind badge を追加したため、古いキャッシュの status では🗳️が付かない。
-# - そのため CACHE_VERSION を上げてキャッシュを作り直す。
-CACHE_VERSION="v7.4.9"
-CACHE_FILE=".zk_metadata_cache_${CACHE_VERSION}.tsv"
-CACHE_MAGIC="#ZK_CACHE\tv7.4.9\tcols=5\tlinks=pipe"
+usage() {
+  cat >&2 <<'EOF'
+usage:
+  zk_new_child_note.sh [--no-open|--open] <parent-md-file> <child-title> [ROOT_DIR] [TEMPLATE_KEY]
 
-# lifecycle
-ICON_CLOSED="✅ "
-ICON_OPEN="📖 "
-ICON_ERROR="⚠️ "
+options:
+  --no-open   子ノートを作成しても VS Code で開かない（自動ジャンプ抑止）
+  --open      明示的に開く（デフォルト）
 
-# markers
-ICON_FOCUS="🎯 "
-ICON_AWAIT="⏳ "
-ICON_BLOCK="🧱 "
-ICON_CYCLE="🔁 (infinite loop) "
-ICON_ALREADY="🔗 (already shown) "
+env:
+  ZK_NEW_CHILD_OPEN=0  でも --no-open と同じ効果（task.jsonでenv指定したい場合用）
+EOF
+  exit 2
+}
 
-# decision kind badge (always shown when decision: exists)
-ICON_DECISION_NOTE="🗳️ "
-
-# decision layer (accepted is NOT ✅ to avoid collision with closed)
-ICON_ACCEPT="🆗 "
-ICON_REJECT="❌ "
-ICON_SUPER="♻️ "
-ICON_DROP="💤 "
-ICON_PROPOSE="📝 "
-
-ZK_DEBUG="${ZK_DEBUG:-0}"
-ZK_DIAG="${ZK_DIAG:-0}"
-
-dbg() { if [[ "${ZK_DEBUG:-0}" != 0 ]]; then printf '[DBG] %s\n' "$*" >&2; fi; return 0; }
-info() { printf '[INFO] %s\n' "$*" >&2; return 0; }
-die()  { printf '[ERR] %s\n' "$*" >&2; exit 1; }
-
-if (( BASH_VERSINFO[0] < 4 )); then
-  die "bash >= 4 required. Use /opt/homebrew/bin/bash (brew bash) or Git Bash."
-fi
-
-TARGET_FILE="${1:-}"
-[[ -z "$TARGET_FILE" ]] && die "Usage: $0 <file.md>"
-TARGET_FILE="$(cd "$(dirname "$TARGET_FILE")" && pwd -P)/$(basename "$TARGET_FILE")"
-[[ -f "$TARGET_FILE" ]] || die "File not found: $TARGET_FILE"
-
-ROOT_REASON=""
-
-detect_root() {
-  local start d
-  start="$(cd "$(dirname "$TARGET_FILE")" && pwd -P)"
-
-  case "$start" in
-    */"$OUTDIR_NAME")
-      ROOT_REASON="from_dashboards_dir"
-      printf "%s\n" "$(cd "$start/.." && pwd -P)"
-      return
-      ;;
-    */"$OUTDIR_NAME"/*)
-      ROOT_REASON="from_dashboards_child"
-      printf "%s\n" "${start%%/$OUTDIR_NAME/*}"
-      return
-      ;;
+# env で上書き（task.json の options.env で使える）
+if [[ -n "${ZK_NEW_CHILD_OPEN:-}" ]]; then
+  case "${ZK_NEW_CHILD_OPEN}" in
+    0|false|FALSE|no|NO) OPEN_CHILD=0 ;;
+    1|true|TRUE|yes|YES) OPEN_CHILD=1 ;;
   esac
+fi
 
-  d="$start"
-  while :; do
-    if [[ -d "$d/.obsidian" ]]; then ROOT_REASON="found_.obsidian"; printf "%s\n" "$d"; return; fi
-    if [[ -d "$d/.foam"     ]]; then ROOT_REASON="found_.foam";     printf "%s\n" "$d"; return; fi
-    if [[ -d "$d/.git"      ]]; then ROOT_REASON="found_.git";      printf "%s\n" "$d"; return; fi
-    if [[ -d "$d/.vscode"   ]]; then ROOT_REASON="found_.vscode";   printf "%s\n" "$d"; return; fi
-    [[ "$d" == "/" ]] && break
-    d="$(dirname "$d")"
-  done
+# 引数パース（オプションはどこに置いてもOK）
+pos=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-open) OPEN_CHILD=0 ;;
+    --open)    OPEN_CHILD=1 ;;
+    -h|--help) usage ;;
+    *)         pos+=("$1") ;;
+  esac
+  shift
+done
 
-  ROOT_REASON="fallback_to_start_dir"
-  printf "%s\n" "$start"
+PARENT_FILE="${pos[0]:-}"
+CHILD_TITLE="${pos[1]:-}"
+ROOT="${pos[2]:-}"
+TEMPLATE_KEY="${pos[3]:-task}"   # task / review など
+
+if [[ -z "$PARENT_FILE" || -z "$CHILD_TITLE" ]]; then
+  usage
+fi
+
+to_posix() {
+  local p="$1"
+  if command -v cygpath >/dev/null 2>&1; then
+    if [[ "$p" =~ ^[A-Za-z]:[\\/]|\\ ]]; then
+      cygpath -u "$p"
+      return
+    fi
+  fi
+  printf '%s\n' "$p"
 }
 
-ROOT="$(detect_root)"
-
-if [[ "$(basename "$ROOT")" == "$OUTDIR_NAME" ]]; then
-  ROOT_REASON="${ROOT_REASON}+auto_fix_parent"
-  ROOT="$(cd "$ROOT/.." && pwd -P)"
-fi
-
-OUTDIR="${ROOT}/${OUTDIR_NAME}"
-mkdir -p "$OUTDIR"
-OUTPUT_FILE="${OUTDIR}/${FIXED_FILENAME}"
-CACHE_PATH="${OUTDIR}/${CACHE_FILE}"
-
-OS_NAME="$(uname)"
-
-# stat コマンドは「配列」で保持（スペース含みの事故防止）
-STAT_CMD=(stat -c %Y)
-if [[ "$OS_NAME" == "Darwin" ]]; then
-  STAT_CMD=(stat -f %m)
-fi
-
-info "TARGET_FILE=$TARGET_FILE"
-info "ROOT=$ROOT (reason=$ROOT_REASON)"
-info "OUTDIR=$OUTDIR"
-info "OUTPUT_FILE=$OUTPUT_FILE"
-info "CACHE_PATH=$CACHE_PATH"
-dbg  "STAT_CMD=${STAT_CMD[*]}"
-
-if [[ "$ZK_DIAG" != 0 ]]; then
-  cnt="$(find "$ROOT" \( -path "*/.*" \) -prune -o -type f -name "*.md" -print 2>/dev/null | wc -l | tr -d ' ')"
-  info "DIAG md_count_under_ROOT=$cnt"
-  info "DIAG sample_md_files:"
-  find "$ROOT" \( -path "*/.*" \) -prune -o -type f -name "*.md" -print 2>/dev/null \
-    | head -n 20 | sed 's/^/[INFO]   /' >&2
-  exit 0
-fi
-
-declare -A ID_MAP=()
-declare -A STATUS_MAP=()
-declare -A LINKS_MAP=()
-declare -A MTIME_MAP=()
-declare -A PATH_TO_ID=()
-declare -A DIRTY=()
-
-is_digits() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
-now_ts() { date '+%Y%m%d%H%M%S'; }
-
-backup_bad_cache() {
-  local src="$1"
-  [[ -f "$src" ]] || return
-  local dst="${src}.bak.$(now_ts)"
-  mv -f "$src" "$dst"
-  info "cache invalid -> moved to: $dst"
+clip_set() {
+  local s="$1"
+  if command -v pbcopy >/dev/null 2>&1; then
+    printf '%s' "$s" | pbcopy
+  elif command -v clip.exe >/dev/null 2>&1; then
+    printf '%s' "$s" | clip.exe
+  elif command -v xclip >/dev/null 2>&1; then
+    printf '%s' "$s" | xclip -selection clipboard
+  else
+    return 0
+  fi
 }
 
-# ------------------------------------------------------------
-# scan_file: frontmatter + marker + wikilinks (+ superseded_by)
-# 出力: fid<TAB>status<TAB>links
-# status は「life + decision_kind + decision_state + marker...」の合成
-# ------------------------------------------------------------
-scan_file() {
-  awk \
-    -v ic="$ICON_CLOSED" -v io="$ICON_OPEN" \
-    -v idec="$ICON_DECISION_NOTE" \
-    -v iacc="$ICON_ACCEPT" -v irej="$ICON_REJECT" -v isup="$ICON_SUPER" -v idrp="$ICON_DROP" -v iprp="$ICON_PROPOSE" \
-    -v ifoc="$ICON_FOCUS" -v ib="$ICON_BLOCK" -v ia="$ICON_AWAIT" '
-  function norm_ws(s){ gsub(/　/, " ", s); return s }
-  function trim(s){
-    s = norm_ws(s)
-    sub(/^\xef\xbb\xbf/, "", s)
-    gsub(/\r/, "", s)
-    gsub(/^[ \t]+|[ \t]+$/, "", s)
-    return s
-  }
-  function strip_container(s){
-    s = trim(s)
-    while (1) {
-      if (s ~ /^>[ \t]*/) { sub(/^>[ \t]*/, "", s); s=trim(s); continue }
-      if (s ~ /^([-*+])[ \t]+/) { sub(/^([-*+])[ \t]+/, "", s); s=trim(s); continue }
-      if (s ~ /^[0-9]+[.)][ \t]+/) { sub(/^[0-9]+[.)][ \t]+/, "", s); s=trim(s); continue }
-      break
-    }
-    return s
-  }
-  function fence_count(s, c, n){ n=0; while (substr(s, n+1, 1) == c) n++; return n }
-  function strip_quotes(v){
-    v=trim(v)
-    gsub(/^"+|"+$/, "", v)
-    gsub(/^\047+|\047+$/, "", v)
-    gsub(/^\140+|\140+$/, "", v)
-    return v
-  }
-
-  BEGIN {
-    in_fm=0; first=0; fid="none"; closed=0;
-    decision_state=""; allow_marker=1;
-    sup_by="";
-    marker=""; marker_text=""; links="";
-    in_code=0; fence_ch=""; fence_len=0;
-    delete seen
-  }
-
+get_fm_id() {
+  local f="$1"
+  awk '
+  BEGIN{ inFM=0; fmDone=0; nonHead=0 }
   {
-    line=$0
-    sub(/\r$/, "", line)
-    if(NR==1){ sub(/^\xef\xbb\xbf/, "", line) }
-
-    t = trim(line)
-
-    # frontmatter
-    if(!first){
-      if(t==""){ next }
-      first=1
-      if(t ~ /^---[ \t]*$/){ in_fm=1; next }
-    }
-    if(in_fm){
-      if(t ~ /^---[ \t]*$/){ in_fm=0; next }
-
-      if(t ~ /^[ \t]*id:[ \t]*/){
-        fid=line
-        sub(/^[ \t]*id:[ \t]*/, "", fid)
-        fid=trim(fid)
-      }
-      if(t ~ /^[ \t]*closed:[ \t]*/){ closed=1 }
-
-      if(t ~ /^[ \t]*decision:[ \t]*/){
-        ds=line
-        sub(/^[ \t]*decision:[ \t]*/, "", ds)
-        ds=trim(ds)
-        decision_state=tolower(ds)
-      }
-
-      if(t ~ /^[ \t]*superseded_by:[ \t]*/){
-        v=line
-        sub(/^[ \t]*superseded_by:[ \t]*/, "", v)
-        v=strip_quotes(v)
-        sup_by=v
-      }
-      next
+    if (fmDone==0 && inFM==0) {
+      if ($0 ~ /^[[:space:]]*$/) next
+      if ($0 !~ /^[[:space:]]*---[[:space:]]*$/) nonHead=1
     }
 
-    # decision が終端状態なら marker は抑制
-    if(decision_state!=""){
-      if(decision_state ~ /^(accepted|rejected|superseded|dropped)$/){
-        allow_marker=0
-      } else {
-        allow_marker=1
-      }
-    } else {
-      allow_marker=1
+    if ($0 ~ /^[[:space:]]*---[[:space:]]*$/) {
+      if (inFM==0 && fmDone==0) { inFM=1; next }
+      else if (inFM==1 && fmDone==0) { inFM=0; fmDone=1; exit }
     }
 
-    # fenced code skip
-    u = strip_container(line)
+    if (inFM==1 && $0 ~ /^[[:space:]]*id:[[:space:]]*/) {
+      line=$0
+      sub(/^[[:space:]]*id:[[:space:]]*/, "", line)
+      gsub(/^[ "\x27`]+|[ "\x27`]+$/, "", line)
+      print line
+      exit
+    }
+  }' "$f"
+}
 
-    if(in_code){
-      if(substr(u,1,1)==fence_ch){
-        n = fence_count(u, fence_ch)
-        if(n >= fence_len){
-          rest = trim(substr(u, n+1))
-          if(rest==""){ in_code=0; next }
-        }
-      }
-      next
-    } else {
-      c = substr(u,1,1)
-      if(c=="`" || c=="~"){
-        n = fence_count(u, c)
-        if(n >= 3){
-          fence_ch=c
-          fence_len=n
-          in_code=1
+slugify() {
+  local s="$1"
+  s="${s// /_}"
+  s="$(printf '%s' "$s" | tr -d '\r')"
+  s="$(printf '%s' "$s" | sed -E 's/[^0-9A-Za-zぁ-んァ-ン一-龠ー_・-]+/_/g; s/_+/_/g; s/^_+|_+$//g')"
+  [[ -n "$s" ]] || s="child"
+  printf '%s\n' "$s"
+}
+
+insert_link_below_frontmatter() {
+  local parent="$1"
+  local child_base="$2"  # 拡張子なし
+  local link="[[${child_base}]]"
+
+  if grep -Fq "$link" "$parent"; then
+    echo "[INFO] link already exists in parent, skip insert"
+    return 0
+  fi
+
+  local tmp
+  tmp="$(mktemp)"
+
+  awk -v link="$link" '
+    BEGIN { started=0; inFM=0; inserted=0 }
+
+    {
+      line=$0
+
+      if (started==0) {
+        if (line ~ /^[[:space:]]*$/) { print $0; next }
+        if (line ~ /^[[:space:]]*---[[:space:]]*$/) {
+          started=1
+          inFM=1
+          print $0
           next
         }
+        started=2
+        print $0
+        next
       }
+
+      if (started==1 && inFM==1) {
+        print $0
+        if (line ~ /^[[:space:]]*---[[:space:]]*$/) {
+          inFM=0
+          if (!inserted) {
+            print ""
+            print link
+            print ""
+            inserted=1
+          }
+        }
+        next
+      }
+
+      print $0
     }
 
-    # marker（許可されている場合のみ）
-    if(allow_marker==1 && marker == ""){
-      low=tolower(u)
-      if(low ~ /@focus/){
-        marker=ifoc
-      } else if(low ~ /@blocked/){
-        marker=ib; marker_text=u
-        sub(/.*@blocked[[:space:]]*/, "", marker_text)
-        marker_text=" (🧱 " trim(marker_text) ")"
-      } else if(low ~ /@awaiting/){
-        marker=ia; marker_text=u
-        sub(/.*@awaiting[[:space:]]*/, "", marker_text)
-        marker_text=" (⏳ " trim(marker_text) ")"
-      }
+    END {
+      if (started==1 && inserted==0) exit 3
     }
-
-    # inline code remove
-    temp=line
-    gsub(/`[^`]*`/, "", temp)
-
-    # wikilink extract
-    while(match(temp, /\[\[[^][]+\]\]/)){
-      lnk=substr(temp, RSTART+2, RLENGTH-4)
-      if(lnk ~ /^[ \t]/){ temp=substr(temp, RSTART+RLENGTH); continue }
-
-      split(lnk, p, "|"); split(p[1], f, "#")
-      name=trim(f[1])
-      if(name ~ /[*…]/){ temp=substr(temp, RSTART+RLENGTH); continue }
-
-      if(name!="" && !(name in seen)){
-        seen[name]=1
-        links = links name "|"
-      }
-      temp=substr(temp, RSTART+RLENGTH)
-    }
+  ' "$parent" > "$tmp" || {
+    rc=$?
+    rm -f "$tmp"
+    return "$rc"
   }
 
-  END {
-    gsub(/\t/, " ", marker_text)
-    gsub(/\t/, " ", links)
-    gsub(/\n/, " ", links)
-    if(links=="") links="|"
-
-    # life icon
-    life = (closed?ic:io)
-
-    # decision kind badge (always when decision exists)
-    kind = (decision_state != "" ? idec : "")
-
-    # decision icon (state)
-    dec = ""
-    if(decision_state!=""){
-      if(decision_state ~ /^accepted$/) dec=iacc
-      else if(decision_state ~ /^rejected$/) dec=irej
-      else if(decision_state ~ /^superseded$/) dec=isup
-      else if(decision_state ~ /^dropped$/) dec=idrp
-      else dec=iprp
-    }
-
-    status_out = life kind dec marker marker_text
-
-    if(decision_state ~ /^superseded$/ && sup_by!=""){
-      gsub(/\t/, " ", sup_by)
-      gsub(/\n/, " ", sup_by)
-      status_out = status_out " (→ " sup_by ")"
-    }
-
-    printf "%s\t%s\t%s\n", fid, status_out, links
-  }' "$1"
+  mv "$tmp" "$parent"
+  echo "[INFO] inserted below frontmatter: $link"
 }
 
-# ------------------------------------------------------------
-# 1) キャッシュ読み込み
-# ------------------------------------------------------------
-CACHE_OK=0
-if [[ -f "$CACHE_PATH" ]]; then
-  IFS= read -r firstline < "$CACHE_PATH" || firstline=""
-  if [[ "$firstline" == "$CACHE_MAGIC" ]]; then
-    CACHE_OK=1
-    info "Loading cache..."
-    while IFS=$'\t' read -r f_path mtime fid status links extra; do
-      [[ -z "${f_path:-}" ]] && continue
-      [[ -f "$f_path" ]] || continue
+esc_sed_repl() {
+  printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'
+}
 
-      if [[ -n "${extra:-}" ]]; then MTIME_MAP["$f_path"]="INVALID"; continue; fi
-      if ! is_digits "${mtime:-}"; then MTIME_MAP["$f_path"]="INVALID"; continue; fi
+render_template() {
+  local tmpl_file="$1"
+  local out_file="$2"
 
-      links="${links//$'\r'/}"
+  local ID_ESC PARENT_ESC TODAY_ESC NOW_ESC CHILD_BASE_ESC TITLE_ESC
+  ID_ESC="$(esc_sed_repl "$CHILD_ID")"
+  PARENT_ESC="$(esc_sed_repl "$PARENT_ID")"
+  TODAY_ESC="$(esc_sed_repl "$TODAY_YMD")"
+  NOW_ESC="$(esc_sed_repl "$NOW")"
+  CHILD_BASE_ESC="$(esc_sed_repl "$CHILD_BASE")"
+  TITLE_ESC="$(esc_sed_repl "$CHILD_TITLE")"
 
-      if [[ -z "$links" || "$links" != *"|"* ]]; then
-        MTIME_MAP["$f_path"]="INVALID"
-        STATUS_MAP["$f_path"]="$status"
-        LINKS_MAP["$f_path"]=""
-        PATH_TO_ID["$f_path"]="$fid"
-        [[ -n "$fid" && "$fid" != "none" ]] && ID_MAP["$fid"]="$f_path"
-        continue
-      fi
+  sed \
+    -e "s|{{ID}}|${ID_ESC}|g" \
+    -e "s|{{PARENT}}|${PARENT_ESC}|g" \
+    -e "s|{{TODAY}}|${TODAY_ESC}|g" \
+    -e "s|{{NOW}}|${NOW_ESC}|g" \
+    -e "s|{{CHILD_BASE}}|${CHILD_BASE_ESC}|g" \
+    -e "s|{{TITLE}}|${TITLE_ESC}|g" \
+    "$tmpl_file" > "$out_file"
+}
 
-      MTIME_MAP["$f_path"]="$mtime"
-      STATUS_MAP["$f_path"]="$status"
-      LINKS_MAP["$f_path"]="$links"
-      PATH_TO_ID["$f_path"]="$fid"
-      [[ -n "$fid" && "$fid" != "none" ]] && ID_MAP["$fid"]="$f_path"
-    done < <(tail -n +2 "$CACHE_PATH")
-  else
-    info "cache header mismatch -> backup & rebuild"
-    backup_bad_cache "$CACHE_PATH"
-    CACHE_OK=0
+PARENT_FILE="$(to_posix "$PARENT_FILE")"
+[[ -f "$PARENT_FILE" ]] || { echo "[ERR] not found: $PARENT_FILE" >&2; exit 2; }
+
+if [[ -z "$ROOT" ]]; then
+  ROOT="$(cd "$(dirname "$PARENT_FILE")" && pwd)"
+else
+  ROOT="$(to_posix "$ROOT")"
+fi
+
+PARENT_ID="$(get_fm_id "$PARENT_FILE")"
+if [[ -z "$PARENT_ID" ]]; then
+  echo "[ERR] parent has no id: $PARENT_FILE" >&2
+  exit 1
+fi
+
+TODAY_YMD="$(date '+%Y-%m-%d')"
+NOW="$(date '+%Y-%m-%d %H:%M')"
+
+BASE="$(slugify "$CHILD_TITLE")"
+CHILD_BASE="${TODAY_YMD}_${BASE}"
+CHILD_PATH="${ROOT}/${CHILD_BASE}.md"
+CHILD_ID="$(date '+%Y%m%d')-${CHILD_BASE}"
+
+if [[ -e "$CHILD_PATH" ]]; then
+  echo "[ERR] already exists: $CHILD_PATH" >&2
+  exit 1
+fi
+
+TEMPL_DIR="${ROOT}/templates"
+TEMPL_FILE="${TEMPL_DIR}/child_${TEMPLATE_KEY}.md"
+
+if [[ ! -f "$TEMPL_FILE" ]]; then
+  echo "[ERR] template not found: $TEMPL_FILE" >&2
+  echo "[HINT] create templates/child_${TEMPLATE_KEY}.md (e.g. child_task.md, child_review.md)" >&2
+  exit 1
+fi
+
+render_template "$TEMPL_FILE" "$CHILD_PATH"
+
+echo "[INFO] created: $CHILD_PATH"
+echo "[INFO] parent id : $PARENT_ID"
+echo "[INFO] template  : ${TEMPLATE_KEY}"
+
+insert_link_below_frontmatter "$PARENT_FILE" "$CHILD_BASE" || {
+  echo "[WARN] could not insert below frontmatter; fallback to append end" >&2
+  printf '\n[[%s]]\n' "$CHILD_BASE" >> "$PARENT_FILE"
+}
+
+clip_set "$PARENT_ID" || true
+
+# VS Codeで子を開く（←ここが「自動ジャンプ」なので抑止可能にする）
+if [[ "$OPEN_CHILD" -eq 1 ]]; then
+  if command -v code >/dev/null 2>&1; then
+    code -r "$CHILD_PATH" >/dev/null 2>&1 || true
   fi
 else
-  dbg "cache not found: $CACHE_PATH"
-fi
-
-# ------------------------------------------------------------
-# 2) ファイル名→パス(ID_MAP)を毎回構築
-# ------------------------------------------------------------
-FIND_ERR="$(mktemp 2>/dev/null || echo "/tmp/zk_find_err.$$")"
-FILE_COUNT=0
-
-while IFS= read -r -d '' f; do
-  [[ -f "$f" ]] || continue
-  name="$(basename "${f%.md}")"
-  ID_MAP["$name"]="$f"
-  FILE_COUNT=$((FILE_COUNT+1))
-done < <(find "$ROOT" \( -path "*/.*" \) -prune -o -type f -name "*.md" ! -path "$OUTPUT_FILE" -print0 2>"$FIND_ERR" || true)
-
-if [[ -s "$FIND_ERR" ]]; then
-  info "find produced warnings/errors (non-fatal):"
-  sed 's/^/[INFO]   /' "$FIND_ERR" >&2
-fi
-rm -f "$FIND_ERR" || true
-
-info "indexed_by_filename count=$FILE_COUNT under ROOT=$ROOT"
-(( FILE_COUNT > 0 )) || die "vault scan returned 0 md files. ROOT is wrong or find failed."
-
-# ------------------------------------------------------------
-# 3) オンデマンドでメタを保証
-# ------------------------------------------------------------
-ensure_meta() {
-  local f="$1"
-  [[ -f "$f" ]] || return
-
-  local cur m_cached need=0
-  cur="$("${STAT_CMD[@]}" "$f" 2>/dev/null || echo 0)"
-  is_digits "$cur" || cur=0
-
-  m_cached="${MTIME_MAP["$f"]:-}"
-  if [[ -z "$m_cached" || "$m_cached" == "INVALID" || "$m_cached" != "$cur" ]]; then
-    need=1
-  fi
-
-  if (( need == 0 )); then
-    [[ -z "${STATUS_MAP["$f"]+x}" ]] && need=1
-    [[ -z "${LINKS_MAP["$f"]+x}"  ]] && need=1
-  fi
-
-  if (( need == 1 )); then
-    dbg "scan(on-demand): $f"
-    local res fid status links
-    res="$(scan_file "$f")"
-    IFS=$'\t' read -r fid status links <<< "$res"
-
-    MTIME_MAP["$f"]="$cur"
-    STATUS_MAP["$f"]="$status"
-    LINKS_MAP["$f"]="$links"
-    PATH_TO_ID["$f"]="$fid"
-    [[ -n "$fid" && "$fid" != "none" ]] && ID_MAP["$fid"]="$f"
-
-    DIRTY["$f"]=1
-  fi
-}
-
-# ------------------------------------------------------------
-# 4) ツリー構築
-# ------------------------------------------------------------
-declare -A visited_global=()
-TREE_CONTENT=""
-
-normalize_token() {
-  local s="$1"
-  s="${s//$'\r'/}"
-  s="${s#"${s%%[!$' \t　']*}"}"
-  s="${s%"${s##*[!$' \t　']}"}"
-  if [[ "$s" == \[\[*\]\] ]]; then
-    s="${s#\[\[}"; s="${s%\]\]}"
-  fi
-  s="${s%.md}"
-  s="${s#"${s%%[!$' \t　']*}"}"
-  s="${s%"${s##*[!$' \t　']}"}"
-  printf "%s" "$s"
-}
-
-build_tree_safe() {
-  local target="$1" depth="$2" stack="$3"
-  local indent="" i
-  for ((i=0; i<depth; i++)); do indent+="  "; done
-
-  target="$(normalize_token "$target")"
-  if [[ -z "$target" ]]; then
-    TREE_CONTENT+="${indent}- [[UNKNOWN]] ${ICON_ERROR}\n"
-    dbg "MISS token(empty) depth=$depth"
-    return
-  fi
-
-  local f_path="${ID_MAP["$target"]:-}"
-  if [[ -z "$f_path" || ! -f "$f_path" ]]; then
-    TREE_CONTENT+="${indent}- [[${target}]] ${ICON_ERROR}\n"
-    dbg "MISS token=$target (not found in ID_MAP)"
-    return
-  fi
-
-  ensure_meta "$f_path"
-
-  local display_name status
-  display_name="$(basename "${f_path%.md}")"
-  status="${STATUS_MAP["$f_path"]:-$ICON_OPEN}"
-
-  if [[ "$stack" == *"[${f_path}]"* ]]; then
-    TREE_CONTENT+="${indent}- [[${display_name}]] ${status}${ICON_CYCLE}\n"
-    dbg "CYCLE file=$f_path"
-    return
-  fi
-  if [[ -n "${visited_global["$f_path"]:-}" ]]; then
-    TREE_CONTENT+="${indent}- [[${display_name}]] ${status}${ICON_ALREADY}\n"
-    return
-  fi
-
-  visited_global["$f_path"]=1
-  TREE_CONTENT+="${indent}- [[${display_name}]] ${status}\n"
-
-  local raw_links="${LINKS_MAP["$f_path"]:-}"
-  [[ -z "$raw_links" ]] && { dbg "NO_LINKS(meta-missing?) file=$f_path"; return; }
-
-  [[ "$raw_links" == "|" ]] && return
-
-  local old_ifs="$IFS"
-  IFS='|'
-  local -a children=()
-  read -r -a children <<< "$raw_links"
-  IFS="$old_ifs"
-
-  local child
-  for child in "${children[@]}"; do
-    child="$(normalize_token "$child")"
-    [[ -z "$child" ]] && continue
-    build_tree_safe "$child" $((depth + 1)) "${stack}[${f_path}]"
-  done
-}
-
-START_KEY="$(basename "${TARGET_FILE%.md}")"
-info "Generating Tree for: $START_KEY"
-build_tree_safe "$START_KEY" 0 ""
-
-# ------------------------------------------------------------
-# 5) キャッシュ保存
-# ------------------------------------------------------------
-if (( ${#DIRTY[@]} > 0 )) || (( CACHE_OK == 0 )); then
-  info "Saving Cache... touched=${#DIRTY[@]}"
-  tmp="$(mktemp "${OUTDIR}/.zk_cache_tmp.XXXXXX" 2>/dev/null || echo "${CACHE_PATH}.tmp")"
-
-  {
-    printf "%s\n" "$CACHE_MAGIC"
-    for f in "${!MTIME_MAP[@]}"; do
-      [[ -f "$f" ]] || continue
-
-      m="${MTIME_MAP[$f]:-0}"
-      [[ "$m" == "INVALID" ]] && continue
-
-      links="${LINKS_MAP[$f]:-|}"
-      [[ -z "$links" ]] && links="|"
-      [[ "$links" != *"|"* ]] && links="|"
-
-      printf "%s\t%s\t%s\t%s\t%s\n" \
-        "$f" \
-        "$m" \
-        "${PATH_TO_ID[$f]:-none}" \
-        "${STATUS_MAP[$f]:-$ICON_OPEN}" \
-        "$links"
-    done
-  } > "$tmp"
-
-  mv -f "$tmp" "$CACHE_PATH"
-fi
-
-# ------------------------------------------------------------
-# 6) 出力
-# ------------------------------------------------------------
-{
-  echo "---"
-  echo "id: $(date '+%Y%m%d%H%M')-TREE-VIEW"
-  echo "tags: [system, zk-archive]"
-  echo "title: Status Tree - $(basename "${TARGET_FILE%.md}")"
-  echo "closed: $(date '+%Y-%m-%dT%H:%M:%S')"
-  echo "---"
-  echo "# 🌲 High-Speed Tree View: [[$(basename "${TARGET_FILE%.md}")]]"
-  echo -e "$TREE_CONTENT"
-} > "$OUTPUT_FILE"
-
-info "[OK] saved to $OUTPUT_FILE"
-
-if command -v code >/dev/null 2>&1; then
-  code "$OUTPUT_FILE"
+  echo "[INFO] --no-open: skip opening in VS Code"
 fi
