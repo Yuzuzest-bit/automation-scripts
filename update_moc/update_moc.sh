@@ -130,16 +130,17 @@ unset IFS
 #   - 配列定義の中に “素の )” を入れない
 #   - ')' は FIND_CMD+=(')') のように「別要素でクォートして追加」
 # ★Git Bashで壊れない find 配列の作り方（'(' と ')' は必ずクォート）
-FIND_CMD=(find "$VAULT_ROOT")
-FIND_CMD+=('(' -path "*/.*")
+# ★( ) を使わない find（Git Bashで確実に動く）
+FIND_CMD=(find "$VAULT_ROOT" -path "*/.*" -prune -o)
 
 for d in "${PRUNE_ARR[@]}"; do
   d="${d#"${d%%[![:space:]]*}"}"; d="${d%"${d##*[![:space:]]}"}"
   [[ -z "$d" ]] && continue
-  FIND_CMD+=(-o -path "*/$d/*")
+  FIND_CMD+=(-path "*/$d/*" -prune -o)
 done
 
-FIND_CMD+=(')' -prune -o -type f -name "*.md" -print0)
+FIND_CMD+=(-type f -name "*.md" -print0)
+
 
 
 dbg "Indexing md files..."
