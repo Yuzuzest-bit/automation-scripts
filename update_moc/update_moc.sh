@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# update_in_place.sh (FAST, fixed)
+# update_in_place.sh (FAST, fixed2 for Git Bash)
 #
-# Windows(Git Bash)で遅い原因を潰す版:
-# - 1リンクごとに find/head/grep/sed/awk/cut を起動しない
-# - Vault全体を最初に一度だけ索引化（basename等も外部コマンド廃止）
-# - リンク先メタ情報は mtime でキャッシュ（同じノートは一度しか解析しない）
-# - VS Code ${file} が C:\... で来ても to_posix(cygpath) で吸収
+# - Vault全体を最初に一度だけ索引化（1リンクごとの find を撲滅）
+# - リンク先メタは mtime キャッシュ（同一ノートは一度しか解析しない）
+# - VS Code ${file} が C:\... でも to_posix(cygpath) で吸収
 #
 # Optional env:
 #   ZK_DEBUG=1
@@ -128,15 +126,16 @@ PRUNE_DIRS="${ZK_PRUNE_DIRS:-}"
 IFS=',' read -r -a PRUNE_ARR <<< "$PRUNE_DIRS"
 unset IFS
 
-# ★ここが構文エラーの原因だったので修正：
-#    '\(' '\)' ではなく、find の括弧トークンを '(', ')' として配列要素に入れる
-FIND_CMD=(find "$VAULT_ROOT" '(' -path "*/.*" )
+# ★Git Bashで壊れない find 配列の作り方：
+#   - 配列定義の中に “素の )” を入れない
+#   - ')' は FIND_CMD+=(')') のように「別要素でクォートして追加」
+FIND_CMD=(find "$VAULT_ROOT" '(' -path "*/.*")
 for d in "${PRUNE_ARR[@]}"; do
   d="${d#"${d%%[![:space:]]*}"}"; d="${d%"${d##*[![:space:]]}"}"
   [[ -z "$d" ]] && continue
-  FIND_CMD+=( -o -path "*/$d/*" )
+  FIND_CMD+=(-o -path "*/$d/*")
 done
-FIND_CMD+=( ')' -prune -o -type f -name "*.md" -print0 )
+FIND_CMD+=(')' -prune -o -type f -name "*.md" -print0)
 
 dbg "Indexing md files..."
 FILE_COUNT=0
@@ -145,7 +144,7 @@ while IFS= read -r -d '' f; do
   base="${f##*/}"
   base_no_ext="${base%.md}"
 
-  # 競合があっても最初に見つかったものを優先（元の find -quit と同じ曖昧解決）
+  # 競合があっても最初に見つかったものを優先（元の find -quit 的な曖昧解決）
   if [[ -z "${FILE_MAP["$base_no_ext"]+x}" ]]; then
     FILE_MAP["$base_no_ext"]="$f"
   fi
@@ -160,6 +159,8 @@ dbg "Indexed md count=$FILE_COUNT"
 
 resolve_file_path_fast() {
   local filename="$1"  # "xxx.md" or "xxx"
+
+  # 同フォルダ優先
   if [[ -f "$PARENT_DIR/$filename" ]]; then
     printf '%s\n' "$PARENT_DIR/$filename"
     return 0
@@ -214,7 +215,6 @@ scan_meta() {
     in_fm=0; first=0;
     closed=0; decision=""; sup_by="";
     in_code=0; fence_ch=""; fence_len=0;
-
     a_txt=""; b_txt=""; f_txt="";
   }
 
@@ -224,7 +224,6 @@ scan_meta() {
     if(NR==1){ sub(/^\xef\xbb\xbf/, "", line) }
     t=trim(line)
 
-    # frontmatter
     if(!first){
       if(t=="") next
       first=1
@@ -232,7 +231,6 @@ scan_meta() {
     }
     if(in_fm){
       if(t ~ /^---[ \t]*$/){ in_fm=0; next }
-
       if(t ~ /^closed:[ \t]*/){ closed=1 }
       if(t ~ /^decision:[ \t]*/){
         sub(/^decision:[ \t]*/, "", t)
@@ -245,7 +243,6 @@ scan_meta() {
       next
     }
 
-    # fenced code skip
     u=trim(line)
     if(in_code){
       c=substr(u,1,1)
@@ -261,29 +258,14 @@ scan_meta() {
       c=substr(u,1,1)
       if(c=="`" || c=="~"){
         n=fence_count(u,c)
-        if(n>=3){
-          fence_ch=c; fence_len=n; in_code=1; next
-        }
+        if(n>=3){ fence_ch=c; fence_len=n; in_code=1; next }
       }
     }
 
     low=tolower(line)
-
-    if(a_txt=="" && low ~ /@awaiting/){
-      a_txt=line
-      sub(/.*@awaiting[[:space:]]*/, "", a_txt)
-      a_txt=trim(a_txt)
-    }
-    if(b_txt=="" && low ~ /@blocked/){
-      b_txt=line
-      sub(/.*@blocked[[:space:]]*/, "", b_txt)
-      b_txt=trim(b_txt)
-    }
-    if(f_txt=="" && low ~ /@focus/){
-      f_txt=line
-      sub(/.*@focus[[:space:]]*/, "", f_txt)
-      f_txt=trim(f_txt)
-    }
+    if(a_txt=="" && low ~ /@awaiting/){ a_txt=line; sub(/.*@awaiting[[:space:]]*/, "", a_txt); a_txt=trim(a_txt) }
+    if(b_txt=="" && low ~ /@blocked/ ){ b_txt=line; sub(/.*@blocked[[:space:]]*/,  "", b_txt); b_txt=trim(b_txt) }
+    if(f_txt=="" && low ~ /@focus/   ){ f_txt=line; sub(/.*@focus[[:space:]]*/,    "", f_txt); f_txt=trim(f_txt) }
   }
 
   END{
@@ -306,9 +288,7 @@ scan_meta() {
     }
 
     arrow=""
-    if(decision=="superseded" && sup_by!=""){
-      arrow=sup_by
-    }
+    if(decision=="superseded" && sup_by!=""){ arrow=sup_by }
 
     gsub(/\t/, " ", text)
     gsub(/\t/, " ", arrow)
@@ -352,7 +332,6 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     link_alias="${BASH_REMATCH[3]}"
     suffix="${BASH_REMATCH[4]}"
 
-    # [[Note#Heading]] の # 以降は解決に使わない
     target_filepart="${link_target%%#*}"
     target_filepart="${target_filepart#"${target_filepart%%[!$' \t　']*}"}"
     target_filepart="${target_filepart%"${target_filepart##*[!$' \t　']}"}"
