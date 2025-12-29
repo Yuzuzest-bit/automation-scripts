@@ -8,12 +8,15 @@
 #
 # Optional env:
 #   ZK_DEBUG=1
+#   ZK_TRACE=1
+#   ZK_TRACE_MAX=80
 #   ZK_PRUNE_DIRS="attachments,exports,archive,node_modules"
 #
 
 # --- if not running under bash, re-exec with bash (POSIX-safe) ---
 [ -n "${BASH_VERSION-}" ] || exec bash "$0" "$@"
 
+# --- locale safety (avoid Unicode substring weirdness on macOS) ---
 if command -v locale >/dev/null 2>&1 && locale -a 2>/dev/null | grep -qi '^c\.utf-8$'; then
   export LC_ALL=C.UTF-8
 elif command -v locale >/dev/null 2>&1 && locale -a 2>/dev/null | grep -qi '^en_us\.utf-8$'; then
@@ -56,9 +59,7 @@ _trace_n=0
 # Variation Selector-16 (emoji presentation)
 VS16=$'\uFE0F'   # "️"
 
-
 hex_head() { # show first ~48 bytes in hex (for invisible diffs)
-  # mac/linux/git-bash だいたい od がある前提
   printf '%s' "$1" | LC_ALL=C od -An -tx1 -v 2>/dev/null | tr -d ' \n' | cut -c1-96
 }
 
@@ -68,9 +69,6 @@ trace() {
   ((_trace_n > ZK_TRACE_MAX)) && return 0
   printf '[TRACE] %s\n' "$*" >&2
 }
-
-
-
 
 ZK_DEBUG="${ZK_DEBUG:-0}"
 dbg(){ if [[ "${ZK_DEBUG}" != 0 ]]; then printf '[DBG] %s\n' "$*" >&2; fi; }
@@ -136,27 +134,46 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
 fi
 
 # -----------------------------
-# 文字列ユーティリティ
+# 文字列ユーティリティ（substringを避ける）
 # -----------------------------
-ltrim_wsFWSP=$'\u3000'  # 全角スペース
+FWSP=$'\u3000'  # 全角スペース
 
 ltrim_ws() {
   local s="$1"
   while :; do
     case "$s" in
-      " "*)    s="${s# }" ;;
-      $'\t'*)  s="${s#$'\t'}" ;;
-      $'\r'*)  s="${s#$'\r'}" ;;
-      $'\n'*)  s="${s#$'\n'}" ;;
-      $'\v'*)  s="${s#$'\v'}" ;;
-      $'\f'*)  s="${s#$'\f'}" ;;
-      "$FWSP"*) s="${s#"$FWSP"}" ;;
+      " "*)      s="${s# }" ;;
+      $'\t'*)    s="${s#$'\t'}" ;;
+      $'\r'*)    s="${s#$'\r'}" ;;
+      $'\n'*)    s="${s#$'\n'}" ;;
+      $'\v'*)    s="${s#$'\v'}" ;;
+      $'\f'*)    s="${s#$'\f'}" ;;
+      "$FWSP"*)  s="${s#"$FWSP"}" ;;
       *) break ;;
     esac
   done
   printf '%s' "$s"
 }
 
+trim_ws_basic() {
+  local s
+  s="$(ltrim_ws "$1")"
+  while :; do
+    case "$s" in
+      *" ")      s="${s% }" ;;
+      *$'\t')    s="${s%$'\t'}" ;;
+      *$'\r')    s="${s%$'\r'}" ;;
+      *$'\n')    s="${s%$'\n'}" ;;
+      *$'\v')    s="${s%$'\v'}" ;;
+      *$'\f')    s="${s%$'\f'}" ;;
+      *"$FWSP")  s="${s%$FWSP}" ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$s"
+}
+
+# "(...)" / "（...）" を“最初の閉じ括弧まで”で食う（安全・高速）
 strip_paren_group_any() {
   local s="$1"
   case "$s" in
@@ -165,78 +182,6 @@ strip_paren_group_any() {
     * )     printf '%s' "$s" ;;
   esac
 }
-
-
-# strip balanced parentheses: supports "("...")" and "（"... "）"
-strip_balanced_parens_any() {
-  local s="$1"
-  local open="${s:0:1}"
-  local close=")"
-  [[ "$open" == "（" ]] && close="）"
-
-  [[ "$open" == "(" || "$open" == "（" ]] || { printf '%s' "$s"; return 0; }
-
-  local depth=0 i ch
-  for ((i=0; i<${#s}; i++)); do
-    ch="${s:i:1}"
-    if [[ "$ch" == "$open" ]]; then
-      ((depth++))
-    elif [[ "$ch" == "$close" ]]; then
-      ((depth--))
-      if (( depth == 0 )); then
-        printf '%s' "${s:i+1}"
-        return 0
-      fi
-    fi
-  done
-  printf '%s' ""  # unmatched -> drop rest
-}
-
-# s starts with '(' -> return remainder after the matching ')'
-# if unmatched, return empty (drop the rest)
-strip_balanced_parens() {
-  local s="$1"
-  [[ "${s:0:1}" == "(" ]] || { printf '%s' "$s"; return 0; }
-
-  local depth=0 i ch
-  for ((i=0; i<${#s}; i++)); do
-    ch="${s:i:1}"
-    if [[ "$ch" == "(" ]]; then
-      ((depth++))
-    elif [[ "$ch" == ")" ]]; then
-      ((depth--))
-      if (( depth == 0 )); then
-        printf '%s' "${s:i+1}"
-        return 0
-      fi
-    fi
-  done
-  printf '%s' ""
-}
-
-trim_ws_basic() {
-  local s
-  s="$(ltrim_ws "$1")"
-  while :; do
-    case "$s" in
-      *" ")     s="${s% }" ;;
-      *$'\t')   s="${s%$'\t'}" ;;
-      *$'\r')   s="${s%$'\r'}" ;;
-      *$'\n')   s="${s%$'\n'}" ;;
-      *$'\v')   s="${s%$'\v'}" ;;
-      *$'\f')   s="${s%$'\f'}" ;;
-      *"$FWSP") s="${s%$FWSP}" ;;
-      *) break ;;
-    esac
-  done
-  printf '%s' "$s"
-}
-
-# -----------------------------
-# ここが “増殖しない” の核心
-#  - prefix(リンク直前)から自動アイコンを全部除去（位置がズレてても消す）
-#  - suffix(リンク直後)から自動コメント/矢印を連続除去（何個でも）
-# -----------------------------
 
 # -----------------------------
 # prefix: “自動付与アイコン”を確実に削除（VS16有無/末尾スペース有無も両対応）
@@ -268,7 +213,6 @@ clean_prefix_segment() {
   # 念のため “️”(VS16) 単体が残っても消す（見えないゴミ対策）
   s="${s//$VS16/}"
   printf '%s' "$s"
-
 }
 
 # -----------------------------
@@ -280,7 +224,7 @@ consume_auto_suffix() {
   local had_ws=0 removed=0 progressed=0
 
   case "$s" in
-    " "*|$'\t'*|'　'*) had_ws=1;;
+    " "*|$'\t'*|"$FWSP"*) had_ws=1;;
   esac
 
   s="$(ltrim_ws "$s")"
@@ -292,7 +236,6 @@ consume_auto_suffix() {
     if [[ "$s" == ⏳* || "$s" == 🧱* || "$s" == 🎯* ]]; then
       removed=1; progressed=1
 
-      # どのマークか判定して “そのマーク + (あればVS16)” を prefix で削る
       if [[ "$s" == ⏳$VS16* ]]; then
         s="${s#⏳$VS16}"
       elif [[ "$s" == ⏳* ]]; then
@@ -321,7 +264,6 @@ consume_auto_suffix() {
       s="$(ltrim_ws "$s")"
     fi
 
-
     # arrow part: (→ ... ) / （→ ...）
     if [[ "$s" == \(→* || "$s" == （→* ]]; then
       removed=1; progressed=1
@@ -334,10 +276,9 @@ consume_auto_suffix() {
 
   # debug: “剥がすべきっぽいのに残ってる”を検知
   if (( ZK_TRACE )); then
-    local t
+    local t t2
     t="$(ltrim_ws "$orig")"
     if [[ "$t" == ⏳* || "$t" == 🧱* || "$t" == 🎯* || "$t" == \(→* || "$t" == （→* ]]; then
-      local t2
       t2="$(ltrim_ws "$s")"
       if [[ "$t2" == ⏳* || "$t2" == 🧱* || "$t2" == 🎯* || "$t2" == \(→* || "$t2" == （→* ]]; then
         trace "suffix NOT fully consumed"
@@ -712,8 +653,10 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     # 次のリンクへ
     rest="$after_close"
   done
+
   # 残りを付けて1行完成
   out+="$rest"
+
   if (( ZK_TRACE )); then
     if [[ "$line" != "$out" ]]; then
       trace "LINE changed"
@@ -721,6 +664,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       trace "  OUT: $out"
     fi
   fi
+
   printf '%s\n' "$out" >> "$TEMP_FILE"
 done < "$TARGET_FILE"
 
