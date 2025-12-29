@@ -43,6 +43,30 @@ ICON_SUPER="♻️ "
 ICON_DROP="💤 "
 ICON_PROPOSE="📝 "
 
+# ===== DEBUG/normalize switches =====
+ZK_TRACE="${ZK_TRACE:-0}"          # 1 でデバッグ出力
+ZK_TRACE_MAX="${ZK_TRACE_MAX:-30}" # 出しすぎ防止
+_trace_n=0
+
+# Variation Selector-16 (emoji presentation)
+VS16=$'\uFE0F'   # "️"
+
+
+hex_head() { # show first ~48 bytes in hex (for invisible diffs)
+  # mac/linux/git-bash だいたい od がある前提
+  printf '%s' "$1" | LC_ALL=C od -An -tx1 -v 2>/dev/null | tr -d ' \n' | cut -c1-96
+}
+
+trace() {
+  (( ZK_TRACE )) || return 0
+  ((_trace_n++))
+  ((_trace_n > ZK_TRACE_MAX)) && return 0
+  printf '[TRACE] %s\n' "$*" >&2
+}
+
+
+
+
 ZK_DEBUG="${ZK_DEBUG:-0}"
 dbg(){ if [[ "${ZK_DEBUG}" != 0 ]]; then printf '[DBG] %s\n' "$*" >&2; fi; }
 
@@ -113,15 +137,36 @@ ltrim_ws() { # leading whitespace (space/tab + fullwidth space)
   local s="$1"
   while [[ -n "$s" ]]; do
     case "${s:0:1}" in
-      ' '|$'\t'|$'\r'|$'\n'|$'\v'|$'\f'|'　')
-        s="${s:1}"
-        ;;
-      *)
-        break
-        ;;
+      ' '|$'\t'|$'\r'|$'\n'|$'\v'|$'\f'|'　') s="${s:1}";;
+      *) break;;
     esac
   done
   printf '%s' "$s"
+}
+
+# strip balanced parentheses: supports "("...")" and "（"... "）"
+strip_balanced_parens_any() {
+  local s="$1"
+  local open="${s:0:1}"
+  local close=")"
+  [[ "$open" == "（" ]] && close="）"
+
+  [[ "$open" == "(" || "$open" == "（" ]] || { printf '%s' "$s"; return 0; }
+
+  local depth=0 i ch
+  for ((i=0; i<${#s}; i++)); do
+    ch="${s:i:1}"
+    if [[ "$ch" == "$open" ]]; then
+      ((depth++))
+    elif [[ "$ch" == "$close" ]]; then
+      ((depth--))
+      if (( depth == 0 )); then
+        printf '%s' "${s:i+1}"
+        return 0
+      fi
+    fi
+  done
+  printf '%s' ""  # unmatched -> drop rest
 }
 
 # s starts with '(' -> return remainder after the matching ')'
@@ -170,27 +215,42 @@ trim_ws_basic() { # trims ASCII space/tab + fullwidth space
 #  - suffix(リンク直後)から自動コメント/矢印を連続除去（何個でも）
 # -----------------------------
 
+# -----------------------------
+# prefix: “自動付与アイコン”を確実に削除（VS16有無/末尾スペース有無も両対応）
+# -----------------------------
 clean_prefix_segment() {
   local s="$1"
-  local icon icon2
+  local icon icon_no_vs icon_no_vs_nospace icon_nospace
 
-  # “リンク直前”に紛れ込んだ自動アイコンを全部消す（乱暴だが確実）
   for icon in \
     "$ICON_CLOSED" "$ICON_OPEN" "$ICON_ERROR" \
     "$ICON_MINUTES_NOTE" "$ICON_DECISION_NOTE" \
     "$ICON_ACCEPT" "$ICON_REJECT" "$ICON_SUPER" "$ICON_DROP" "$ICON_PROPOSE"
   do
+    # 1) そのまま
     s="${s//$icon/}"
-    icon2="${icon% }"
-    if [[ "$icon2" != "$icon" ]]; then
-      s="${s//$icon2/}"
-    fi
+
+    # 2) 末尾スペース無し
+    icon_nospace="${icon% }"
+    [[ "$icon_nospace" != "$icon" ]] && s="${s//$icon_nospace/}"
+
+    # 3) VS16 を落とした版（見た目同じで別文字を潰す）
+    icon_no_vs="${icon//$VS16/}"
+    [[ "$icon_no_vs" != "$icon" ]] && s="${s//$icon_no_vs/}"
+
+    icon_no_vs_nospace="${icon_no_vs% }"
+    [[ "$icon_no_vs_nospace" != "$icon_no_vs" ]] && s="${s//$icon_no_vs_nospace/}"
   done
 
+  # 念のため “️”(VS16) 単体が残っても消す（見えないゴミ対策）
+  s="${s//$VS16/}"
   printf '%s' "$s"
+
 }
 
-# linkの直後（restの先頭）にある自動装飾だけを食べて、残りを返す
+# -----------------------------
+# suffix: link直後の “自動装飾” を連続で食べ尽くす（全角括弧にも対応）
+# -----------------------------
 consume_auto_suffix() {
   local orig="$1"
   local s="$orig"
@@ -205,40 +265,73 @@ consume_auto_suffix() {
   while :; do
     progressed=0
 
-    # prio: ⏳(...) / 🧱(...) / 🎯(...)
-    if [[ "$s" == ⏳* ]]; then
+    # prio marks: ⏳ / 🧱 / 🎯（VS16 “️” 付きも剥がす）
+    if [[ "$s" == ⏳* || "$s" == 🧱* || "$s" == 🎯* ]]; then
       removed=1; progressed=1
-      s="${s#⏳}"; s="$(ltrim_ws "$s")"
-      if [[ "${s:0:1}" == "(" ]]; then s="$(strip_balanced_parens "$s")"; fi
+
+      # どのマークか判定して “そのマーク + (あればVS16)” を prefix で削る
+      if [[ "$s" == ⏳$VS16* ]]; then
+        s="${s#⏳$VS16}"
+      elif [[ "$s" == ⏳* ]]; then
+        s="${s#⏳}"
+      elif [[ "$s" == 🧱$VS16* ]]; then
+        s="${s#🧱$VS16}"
+      elif [[ "$s" == 🧱* ]]; then
+        s="${s#🧱}"
+      elif [[ "$s" == 🎯$VS16* ]]; then
+        s="${s#🎯$VS16}"
+      elif [[ "$s" == 🎯* ]]; then
+        s="${s#🎯}"
+      fi
+
+      # アイコン直後に VS16 が単独で残るケースも掃除
+      while [[ "$s" == "$VS16"* ]]; do
+        s="${s#"$VS16"}"
+      done
+
       s="$(ltrim_ws "$s")"
-    elif [[ "$s" == 🧱* ]]; then
-      removed=1; progressed=1
-      s="${s#🧱}"; s="$(ltrim_ws "$s")"
-      if [[ "${s:0:1}" == "(" ]]; then s="$(strip_balanced_parens "$s")"; fi
-      s="$(ltrim_ws "$s")"
-    elif [[ "$s" == 🎯* ]]; then
-      removed=1; progressed=1
-      s="${s#🎯}"; s="$(ltrim_ws "$s")"
-      if [[ "${s:0:1}" == "(" ]]; then s="$(strip_balanced_parens "$s")"; fi
+
+      # optional "(...)" or "（...）"
+      if [[ "$s" == \(* || "$s" == （* ]]; then
+        s="$(strip_balanced_parens_any "$s")"
+      fi
       s="$(ltrim_ws "$s")"
     fi
 
-    # arrow: (→ ... )
-    if [[ "$s" == \(→* ]]; then
+
+    # arrow part: (→ ... ) / （→ ...）
+    if [[ "$s" == \(→* || "$s" == （→* ]]; then
       removed=1; progressed=1
-      s="$(strip_balanced_parens "$s")"
+      s="$(strip_balanced_parens_any "$s")"
       s="$(ltrim_ws "$s")"
     fi
 
     (( progressed )) || break
   done
 
+  # debug: “剥がすべきっぽいのに残ってる”を検知
+  if (( ZK_TRACE )); then
+    local t
+    t="$(ltrim_ws "$orig")"
+    if [[ "$t" == ⏳* || "$t" == 🧱* || "$t" == 🎯* || "$t" == \(→* || "$t" == （→* ]]; then
+      local t2
+      t2="$(ltrim_ws "$s")"
+      if [[ "$t2" == ⏳* || "$t2" == 🧱* || "$t2" == 🎯* || "$t2" == \(→* || "$t2" == （→* ]]; then
+        trace "suffix NOT fully consumed"
+        trace "  raw(head) : $(printf '%s' "$orig" | head -c 80)"
+        trace "  left(head): $(printf '%s' "$s" | head -c 80)"
+        trace "  raw(hex)  : $(hex_head "$orig")"
+        trace "  left(hex) : $(hex_head "$s")"
+      fi
+    fi
+  fi
+
   if [[ -z "$s" ]]; then
     printf '%s' ""
     return 0
   fi
 
-  # “もともと空白があった” or “自動装飾を剥がした” 場合は、区切りとして1スペースを付ける
+  # もともと空白があった or 何か剥がしたなら区切り空白1個を付ける
   if (( had_ws || removed )); then
     printf ' %s' "$s"
   else
