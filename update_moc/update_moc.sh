@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# update_in_place.sh (FAST, fixed2 for Git Bash)  + no process-substitution
+# update_in_place.sh (FAST, Git Bash hardening)
 #
 # - Vault全体を最初に一度だけ索引化（1リンクごとの find を撲滅）
 # - リンク先メタは mtime キャッシュ（同一ノートは一度しか解析しない）
 # - VS Code ${file} が C:\... でも to_posix(cygpath) で吸収
-# - Git Bash で落ちやすい「プロセス置換 < <(...)」を廃止（tmp 経由）
+# - 「shで読まれてsyntax error」を潰すため、必ずbashへre-exec
+# - bashの [[ =~ ]] で事故りやすい正規表現は変数に隔離
 #
 # Optional env:
 #   ZK_DEBUG=1
 #   ZK_PRUNE_DIRS="attachments,exports,archive,node_modules"
 #
+
+# --- if not running under bash, re-exec with bash (POSIX-safe) ---
+[ -n "${BASH_VERSION-}" ] || exec bash "$0" "$@"
+
 export LC_ALL=C.UTF-8
 set -Eeuo pipefail
 trap 'rc=$?; printf "[ERR] exit=%d line=%d cmd=%s\n" "$rc" "$LINENO" "$BASH_COMMAND" >&2' ERR
@@ -36,7 +41,13 @@ ICON_PROPOSE="📝 "
 ZK_DEBUG="${ZK_DEBUG:-0}"
 dbg(){ if [[ "${ZK_DEBUG}" != 0 ]]; then printf '[DBG] %s\n' "$*" >&2; fi; }
 
-if [[ -z "$TARGET_FILE" ]]; then
+# bash 4+ required (assoc array)
+if (( BASH_VERSINFO[0] < 4 )); then
+  echo "[ERR] bash >= 4 required. Please run with Git Bash / MSYS2 bash 4+." >&2
+  exit 2
+fi
+
+if [[ -z "${TARGET_FILE}" ]]; then
   echo "usage: $0 <target.md>" >&2
   exit 2
 fi
@@ -91,7 +102,7 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
 fi
 
 # -----------------------------
-# 文字列クリーニング（外部 sed なし）
+# 文字列クリーニング（正規表現事故を避ける）
 # -----------------------------
 clean_prefix() {
   local s="$1"
@@ -104,16 +115,33 @@ clean_prefix() {
   printf '%s' "$s"
 }
 
-clean_suffix() {
+trim_lspace() { # remove leading whitespace
   local s="$1"
-  # 先頭: (🎯|🧱|⏳)(...)
-  if [[ "$s" =~ ^[[:space:]]*(🎯|🧱|⏳)\([^)]*\)(.*)$ ]]; then
-    s="${BASH_REMATCH[2]}"
-  fi
-  # 先頭: (→ ...)
-  if [[ "$s" =~ ^[[:space:]]*\(→[^)]*\)(.*)$ ]]; then
-    s="${BASH_REMATCH[1]}"
-  fi
+  s="${s#"${s%%[!$' \t']*}"}"
+  printf '%s' "$s"
+}
+
+clean_suffix() {
+  local s
+  s="$(trim_lspace "$1")"
+
+  # marker part: 🎯(...) / 🧱(...) / ⏳(...)
+  case "$s" in
+    🎯\(*|🧱\(*|⏳\(*)
+      # remove up to first ')'
+      s="${s#*)}"
+      s="$(trim_lspace "$s")"
+      ;;
+  esac
+
+  # arrow part: (→ ...)
+  case "$s" in
+    \(→*)
+      s="${s#*)}"
+      s="$(trim_lspace "$s")"
+      ;;
+  esac
+
   printf '%s' "$s"
 }
 
@@ -127,30 +155,32 @@ PRUNE_DIRS="${ZK_PRUNE_DIRS:-}"
 IFS=',' read -r -a PRUNE_ARR <<< "$PRUNE_DIRS"
 unset IFS
 
-# ★( ) を使わない find（Git Bashで確実に動く）
-FIND_CMD=(find "$VAULT_ROOT" -path "*/.*" -prune -o)
-
-for d in "${PRUNE_ARR[@]}"; do
-  d="${d#"${d%%[![:space:]]*}"}"; d="${d%"${d##*[![:space:]]}"}"
-  [[ -z "$d" ]] && continue
-  FIND_CMD+=(-path "*/$d/*" -prune -o)
-done
-
-FIND_CMD+=(-type f -name "*.md" -print0)
+# find は固定（dot dir prune のみ）。追加除外は bash 側で弾く（構文事故を完全回避）
+LIST_TMP="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/zk_md_list.$$")"
+find "$VAULT_ROOT" -path "*/.*" -prune -o -type f -name "*.md" -print0 2>/dev/null > "$LIST_TMP" || true
 
 dbg "Indexing md files..."
-
-# ★Git Bashで落ちやすい「プロセス置換 < <(...)」を廃止（tmp 経由）
-LIST_TMP="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/zk_md_list.$$")"
-"${FIND_CMD[@]}" 2>/dev/null > "$LIST_TMP" || true
-
 FILE_COUNT=0
 while IFS= read -r -d '' f; do
   [[ -f "$f" ]] || continue
+
+  # 追加 prune dirs（任意）
+  if [[ "${#PRUNE_ARR[@]}" -gt 0 ]]; then
+    skip=0
+    for d in "${PRUNE_ARR[@]}"; do
+      d="${d#"${d%%[![:space:]]*}"}"; d="${d%"${d##*[![:space:]]}"}"
+      [[ -z "$d" ]] && continue
+      if [[ "$f" == *"/$d/"* ]]; then
+        skip=1
+        break
+      fi
+    done
+    (( skip == 1 )) && continue
+  fi
+
   base="${f##*/}"
   base_no_ext="${base%.md}"
 
-  # 競合があっても最初に見つかったものを優先（元の find -quit 的な曖昧解決）
   if [[ -z "${FILE_MAP["$base_no_ext"]+x}" ]]; then
     FILE_MAP["$base_no_ext"]="$f"
   fi
@@ -168,7 +198,6 @@ dbg "Indexed md count=$FILE_COUNT"
 resolve_file_path_fast() {
   local filename="$1"  # "xxx.md" or "xxx"
 
-  # 同フォルダ優先
   if [[ -f "$PARENT_DIR/$filename" ]]; then
     printf '%s\n' "$PARENT_DIR/$filename"
     return 0
@@ -333,8 +362,10 @@ get_link_info_fast() {
 # -----------------------------
 # 3) 本体: 1行ずつ変換
 # -----------------------------
+RE_WIKILINK='^(.*)\[\[([^]|]+)(\|[^]]+)?\]\](.*)$'
+
 while IFS= read -r line || [[ -n "$line" ]]; do
-  if [[ "$line" =~ (.*)\[\[([^]|]+)(\|[^]]+)?\]\](.*) ]]; then
+  if [[ $line =~ $RE_WIKILINK ]]; then
     prefix="${BASH_REMATCH[1]}"
     link_target="${BASH_REMATCH[2]}"
     link_alias="${BASH_REMATCH[3]}"
