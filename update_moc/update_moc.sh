@@ -14,7 +14,12 @@
 # --- if not running under bash, re-exec with bash (POSIX-safe) ---
 [ -n "${BASH_VERSION-}" ] || exec bash "$0" "$@"
 
-export LC_ALL=C.UTF-8
+if command -v locale >/dev/null 2>&1 && locale -a 2>/dev/null | grep -qi '^c\.utf-8$'; then
+  export LC_ALL=C.UTF-8
+elif command -v locale >/dev/null 2>&1 && locale -a 2>/dev/null | grep -qi '^en_us\.utf-8$'; then
+  export LC_ALL=en_US.UTF-8
+fi
+
 set -Eeuo pipefail
 trap 'rc=$?; printf "[ERR] exit=%d line=%d cmd=%s\n" "$rc" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
@@ -133,16 +138,34 @@ fi
 # -----------------------------
 # 文字列ユーティリティ
 # -----------------------------
-ltrim_ws() { # leading whitespace (space/tab + fullwidth space)
+ltrim_wsFWSP=$'\u3000'  # 全角スペース
+
+ltrim_ws() {
   local s="$1"
-  while [[ -n "$s" ]]; do
-    case "${s:0:1}" in
-      ' '|$'\t'|$'\r'|$'\n'|$'\v'|$'\f'|'　') s="${s:1}";;
-      *) break;;
+  while :; do
+    case "$s" in
+      " "*)    s="${s# }" ;;
+      $'\t'*)  s="${s#$'\t'}" ;;
+      $'\r'*)  s="${s#$'\r'}" ;;
+      $'\n'*)  s="${s#$'\n'}" ;;
+      $'\v'*)  s="${s#$'\v'}" ;;
+      $'\f'*)  s="${s#$'\f'}" ;;
+      "$FWSP"*) s="${s#"$FWSP"}" ;;
+      *) break ;;
     esac
   done
   printf '%s' "$s"
 }
+
+strip_paren_group_any() {
+  local s="$1"
+  case "$s" in
+    "("* )  printf '%s' "${s#*)}" ;;
+    "（"* ) printf '%s' "${s#*）}" ;;
+    * )     printf '%s' "$s" ;;
+  esac
+}
+
 
 # strip balanced parentheses: supports "("...")" and "（"... "）"
 strip_balanced_parens_any() {
@@ -191,19 +214,19 @@ strip_balanced_parens() {
   printf '%s' ""
 }
 
-trim_ws_basic() { # trims ASCII space/tab + fullwidth space
-  local s="$1"
-  # leading
-  s="$(ltrim_ws "$s")"
-  # trailing
-  while [[ -n "$s" ]]; do
-    case "${s: -1}" in
-      ' '|$'\t'|$'\r'|$'\n'|$'\v'|$'\f'|'　')
-        s="${s::-1}"
-        ;;
-      *)
-        break
-        ;;
+trim_ws_basic() {
+  local s
+  s="$(ltrim_ws "$1")"
+  while :; do
+    case "$s" in
+      *" ")     s="${s% }" ;;
+      *$'\t')   s="${s%$'\t'}" ;;
+      *$'\r')   s="${s%$'\r'}" ;;
+      *$'\n')   s="${s%$'\n'}" ;;
+      *$'\v')   s="${s%$'\v'}" ;;
+      *$'\f')   s="${s%$'\f'}" ;;
+      *"$FWSP") s="${s%$FWSP}" ;;
+      *) break ;;
     esac
   done
   printf '%s' "$s"
@@ -293,7 +316,7 @@ consume_auto_suffix() {
 
       # optional "(...)" or "（...）"
       if [[ "$s" == \(* || "$s" == （* ]]; then
-        s="$(strip_balanced_parens_any "$s")"
+        s="$(strip_paren_group_any "$s")"
       fi
       s="$(ltrim_ws "$s")"
     fi
@@ -302,7 +325,7 @@ consume_auto_suffix() {
     # arrow part: (→ ... ) / （→ ...）
     if [[ "$s" == \(→* || "$s" == （→* ]]; then
       removed=1; progressed=1
-      s="$(strip_balanced_parens_any "$s")"
+      s="$(strip_paren_group_any "$s")"
       s="$(ltrim_ws "$s")"
     fi
 
@@ -689,9 +712,15 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     # 次のリンクへ
     rest="$after_close"
   done
-
   # 残りを付けて1行完成
   out+="$rest"
+  if (( ZK_TRACE )); then
+    if [[ "$line" != "$out" ]]; then
+      trace "LINE changed"
+      trace "  IN : $line"
+      trace "  OUT: $out"
+    fi
+  fi
   printf '%s\n' "$out" >> "$TEMP_FILE"
 done < "$TARGET_FILE"
 
