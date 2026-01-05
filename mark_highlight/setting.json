@@ -1,0 +1,14 @@
+"highlight.regexes": {
+  
+"(<)(.*?)(>)": {
+    "filterLanguageRegex": "markdown",
+    "decorations": [
+      { "color": "#686868" }, // 左の<
+      {
+        "backgroundColor": "#420006",
+        "borderRadius": "2px"
+      }, // 中の文字
+      { "color": "#686868" }  // 右の>
+    ]
+  },
+// これよりしたに色々と続く。
