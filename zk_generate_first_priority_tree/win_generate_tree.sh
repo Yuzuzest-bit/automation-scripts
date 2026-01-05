@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# zk_generate_cached_tree_v8_0_win.sh
-# Based on v7.4.10 (Windows Optimized) + Stats Integration
+# zk_generate_cached_tree_v8_0_1_win.sh
+# Based on v8.0.0 (Windows Optimized)
 #
-# Windows(Git Bash)向け最適化(Lite)を維持しつつ、
-# st_result/due などの戦績データを右側に表示する機能を統合。
+# Changes from v8.0.0:
+# - Removed "Attempts" (回数) display.
 #
 set -Eeuo pipefail
 export LANG=en_US.UTF-8
@@ -13,10 +13,9 @@ trap 'rc=$?; printf "[ERR] exit=%d line=%d cmd=%s\n" "$rc" "$LINENO" "$BASH_COMM
 OUTDIR_NAME="dashboards"
 FIXED_FILENAME="TREE_VIEW.md"
 
-# キャッシュバージョンを更新 (列が増えたため)
-CACHE_VERSION="v8.0.0-win-stats"
+# キャッシュバージョンを更新 (表示形式変更のため)
+CACHE_VERSION="v8.0.1-no-attempts"
 CACHE_FILE=".zk_metadata_cache_${CACHE_VERSION}.tsv"
-# cols=6 に増加 (fid, status, stats, links)
 CACHE_MAGIC="#ZK_CACHE\t${CACHE_VERSION}\tcols=6\tlinks=pipe"
 
 # --- Icons (Tree Structure) ---
@@ -117,11 +116,10 @@ info "ROOT=$ROOT (reason=$ROOT_REASON)"
 info "CACHE_PATH=$CACHE_PATH"
 
 if [[ "$ZK_DIAG" != 0 ]]; then
-  # Diag logic omitted for brevity, logic remains same
   exit 0
 fi
 
-# マップ定義に STATS_MAP を追加
+# マップ定義
 declare -A ID_MAP=()
 declare -A STATUS_MAP=()
 declare -A STATS_MAP=()
@@ -142,7 +140,7 @@ backup_bad_cache() {
 }
 
 # ------------------------------------------------------------
-# scan_file: 統合版 (Structure + Stats)
+# scan_file: 統合版 (Structure + Stats) - No Attempts
 # 出力: fid <TAB> status <TAB> stats <TAB> links
 # ------------------------------------------------------------
 scan_file() {
@@ -185,8 +183,8 @@ scan_file() {
     in_code=0; fence_ch=""; fence_len=0;
     in_tags_block=0; is_minutes=0;
     
-    # 戦績用データ
-    st_res=""; st_att=0; st_last=""; st_due="";
+    # 戦績用データ (回数は削除)
+    st_res=""; st_last=""; st_due="";
 
     delete seen
   }
@@ -211,9 +209,8 @@ scan_file() {
       if(t ~ /^[ \t]*decision:[ \t]*/){ decision_state=tolower(trim(substr(line, index(line, ":")+1))) }
       if(t ~ /^[ \t]*superseded_by:[ \t]*/){ sup_by=strip_quotes(substr(line, index(line, ":")+1)) }
 
-      # --- Stats Meta (追加) ---
+      # --- Stats Meta (回数取得を削除) ---
       if(t ~ /^[ \t]*st_result:[ \t]*/){ st_res=trim(substr(line, index(line, ":")+1)) }
-      if(t ~ /^[ \t]*st_attempts:[ \t]*/){ st_att=trim(substr(line, index(line, ":")+1)) }
       if(t ~ /^[ \t]*st_last_solved:[ \t]*/){ st_last=trim(substr(line, index(line, ":")+1)) }
       if(t ~ /^[ \t]*due:[ \t]*/){ st_due=trim(substr(line, index(line, ":")+1)) }
 
@@ -299,14 +296,13 @@ scan_file() {
       status_out = status_out " (→ " sup_by ")"
     }
 
-    # --- Stats Construction ---
+    # --- Stats Construction (Modified) ---
     # Result Mark
     mark_out = mnone
     if(st_res == "st-ok") mark_out = mok
     else if(st_res == "st-wrong") mark_out = mng
     
-    # Attempts
-    att_disp = "(" (st_att?st_att:0) "回)"
+    # Attempts -> Removed
     
     # Last Date
     last_disp = ""
@@ -316,8 +312,9 @@ scan_file() {
     due_disp = ""
     if(st_due != "") due_disp = "due: " st_due
 
-    # Build String
-    stats_out = mark_out " " att_disp " " last_disp " " due_disp
+    # Build String (Removed att_disp)
+    stats_out = mark_out " " last_disp " " due_disp
+    
     # Clean up multiple spaces
     gsub(/  +/, " ", stats_out); gsub(/^ | $/, "", stats_out)
 
@@ -327,7 +324,7 @@ scan_file() {
 }
 
 # ------------------------------------------------------------
-# 1) キャッシュ読み込み (列数増加に対応)
+# 1) キャッシュ読み込み
 # ------------------------------------------------------------
 CACHE_OK=0
 if [[ -f "$CACHE_PATH" ]]; then
@@ -372,7 +369,7 @@ else
 fi
 
 # ------------------------------------------------------------
-# 2) ファイルインデックス (Windows最適化維持)
+# 2) ファイルインデックス
 # ------------------------------------------------------------
 FIND_ERR="$(mktemp 2>/dev/null || echo "/tmp/zk_find_err.$$")"
 FILE_COUNT=0
@@ -410,7 +407,7 @@ ensure_meta() {
 
   if (( need == 0 )); then
     [[ -z "${STATUS_MAP["$f"]+x}" ]] && need=1
-    [[ -z "${STATS_MAP["$f"]+x}" ]] && need=1  # Statsチェック追加
+    [[ -z "${STATS_MAP["$f"]+x}" ]] && need=1
     [[ -z "${LINKS_MAP["$f"]+x}"  ]] && need=1
   fi
 
@@ -431,7 +428,7 @@ ensure_meta() {
 }
 
 # ------------------------------------------------------------
-# 4) ツリー構築 (Statsを表示に追加)
+# 4) ツリー構築 (回数なし)
 # ------------------------------------------------------------
 declare -A visited_global=()
 TREE_CONTENT=""
@@ -472,8 +469,11 @@ build_tree_safe() {
   # --- Stats取得と整形 ---
   stats="${STATS_MAP["$f_path"]:-}"
   local full_disp="${status}"
-  if [[ -n "$stats" && "$stats" != "$MARK_NONE (0回)" ]]; then
-     # 戦績があればスペースで結合
+  
+  # 回数がなくなったため、データが空(ーー)だけなら表示しないなどの制御が必要
+  # もし「ーー」だけでも出したければここを修正する。
+  # 現状: MARK_NONE("ーー") 以外に情報があれば表示
+  if [[ -n "$stats" && "$stats" != "$MARK_NONE" ]]; then
      full_disp="${status} ${stats}"
   fi
   # --------------------
@@ -514,7 +514,7 @@ info "Generating Tree for: $START_KEY"
 build_tree_safe "$START_KEY" 0 ""
 
 # ------------------------------------------------------------
-# 5) キャッシュ保存 (Stats含む)
+# 5) キャッシュ保存
 # ------------------------------------------------------------
 if (( ${#DIRTY[@]} > 0 )) || (( CACHE_OK == 0 )); then
   info "Saving Cache... touched=${#DIRTY[@]}"
