@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# ------------------------------------------------------------
+# zk_sync_due_from_parent_windows.sh
+# 親ノートの due: を子ノートに反映する (高速・再帰検索版)
+# ------------------------------------------------------------
+
+export LANG=ja_JP.UTF-8
+
+PARENT_FILE="${1:-}"
+
+if [[ -z "$PARENT_FILE" || ! -f "$PARENT_FILE" ]]; then
+  echo "[ERR] Parent file not found: $PARENT_FILE"
+  echo "Usage: $0 <dashboard_file> [search_root_dir]"
+  exit 1
+fi
+
+# 検索ルートの設定（指定がなければ親ノートの1つ上の階層）
+DEFAULT_ROOT="$(cd "$(dirname "$PARENT_FILE")/.." && pwd)"
+SEARCH_ROOT="${2:-$DEFAULT_ROOT}"
+
+if [[ ! -d "$SEARCH_ROOT" ]]; then
+  echo "[ERR] Search directory not found: $SEARCH_ROOT"
+  exit 1
+fi
+
+echo "[INFO] Indexing files in: $SEARCH_ROOT ..."
+
+# --- 1. 高速化のためのファイルマッピング ---
+declare -A FILE_MAP
+while IFS= read -r FILE_PATH; do
+  BASENAME=$(basename "$FILE_PATH" .md)
+  FILE_MAP["$BASENAME"]="$FILE_PATH"
+done < <(find "$SEARCH_ROOT" -name "*.md")
+
+echo "[INFO] Indexing complete. Syncing due dates..."
+
+# --- 2. 親ノートから更新対象行を抽出 ---
+# Windowsの改行コード除去して読み込み
+# due: YYYY-MM-DD がある行だけを取得
+TARGET_LINES=$(grep -E '\[\[.+\]\].*due:[[:space:]]*[0-9]{4}-[0-9]{2}-[0-9]{2}' "$PARENT_FILE" | tr -d '\r' || true)
+
+if [[ -z "$TARGET_LINES" ]]; then
+  echo "[WARN] No links with valid 'due: YYYY-MM-DD' found in $PARENT_FILE."
+  exit 0
+fi
+
+IFS=$'\n'
+for LINE in $TARGET_LINES; do
+  
+  # --- 3. Bash正規表現でデータ抽出 (sed起動コスト削減) ---
+  LINK=""
+  DUE_DATE=""
+
+  # リンク抽出 [[LinkName]]
+  if [[ "$LINE" =~ \[\[([^]]+)\]\] ]]; then
+    LINK="${BASH_REMATCH[1]}"
+  fi
+
+  # 日付抽出 due: YYYY-MM-DD
+  if [[ "$LINE" =~ due:[[:space:]]*([0-9]{4}-[0-9]{2}-[0-9]{2}) ]]; then
+    DUE_DATE="${BASH_REMATCH[1]}"
+  fi
+
+  # 抽出失敗、またはファイルが見つからない場合はスキップ
+  if [[ -z "$LINK" || -z "$DUE_DATE" ]]; then
+    continue
+  fi
+
+  # マップからファイルパス取得 (高速アクセス)
+  FILE_PATH="${FILE_MAP[$LINK]:-}"
+
+  if [[ -z "$FILE_PATH" ]]; then
+    # echo "[SKIP] File not found: ${LINK}.md"
+    continue
+  fi
+
+  # --- 4. 子ノートの Frontmatter を更新 (awk) ---
+  # Windowsでは書き込み権限などで失敗しないよう、確実に一時ファイル経由で行う
+  TMP_FILE=$(mktemp)
+  
+  # awk で Frontmatter 内の due を書き換える、あるいは追加する
+  awk -v due_val="due: $DUE_DATE" '
+    BEGIN { inFM=0; fmDone=0; dueSet=0 }
+
+    # 最初の --- (Frontmatter開始)
+    /^---$/ && inFM==0 && fmDone==0 {
+      inFM=1; print; next
+    }
+
+    # Frontmatter 内部の処理
+    inFM==1 {
+      # 既存の due: があれば値を置換してフラグを立てる
+      if ($0 ~ /^due:[[:space:]]*/) {
+        # Windows改行コード対策で sub を念のため入れるが、
+        # 出力は due_val を使うので綺麗になる
+        print due_val
+        dueSet=1
+        next
+      }
+      # Frontmatter終了の --- が来たとき
+      if ($0 ~ /^---$/) {
+        # まだ due をセットしていなければ、--- の直前に挿入
+        if (dueSet==0) {
+          print due_val
+        }
+        inFM=0; fmDone=1; print; next
+      }
+    }
+
+    # Frontmatter 以外はそのまま出力
+    { print }
+  ' "$FILE_PATH" > "$TMP_FILE"
+
+  # ファイル書き戻し
+  mv "$TMP_FILE" "$FILE_PATH"
+  
+  echo "[SYNCED] $LINK -> $DUE_DATE"
+done
+
+echo "----------------------------------------"
+echo "完了！Index の予定を全ての子ノートに反映しました。"
