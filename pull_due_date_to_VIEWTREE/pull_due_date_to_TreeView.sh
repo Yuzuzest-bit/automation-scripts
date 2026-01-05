@@ -1,24 +1,18 @@
 #!/usr/bin/env bash
 # ------------------------------------------------------------
-# zk_update_deep_search.sh
-# 使い方: ./script.sh [ダッシュボードファイル] [検索するルートフォルダ(任意)]
-# 例: ./script.sh dashboard/TREE_VIEW.md .
+# zk_update_fast.sh (Windows高速化版)
 # ------------------------------------------------------------
 
-# 文字化け防止
 export LANG=ja_JP.UTF-8
 
-# 引数1: ダッシュボードファイル (必須)
+# 引数処理
 PARENT_FILE="${1:-}"
-
 if [[ -z "$PARENT_FILE" || ! -f "$PARENT_FILE" ]]; then
   echo "[ERR] Target dashboard file not found."
   echo "Usage: $0 <dashboard_file> [search_root_dir]"
   exit 1
 fi
 
-# 引数2: 検索を開始するルートフォルダ (任意)
-# 指定がなければ、ダッシュボードの「1つ上の階層」をデフォルトとする
 DEFAULT_ROOT="$(cd "$(dirname "$PARENT_FILE")/.." && pwd)"
 SEARCH_ROOT="${2:-$DEFAULT_ROOT}"
 
@@ -27,47 +21,59 @@ if [[ ! -d "$SEARCH_ROOT" ]]; then
   exit 1
 fi
 
-echo "[INFO] Dashboard: $PARENT_FILE"
-echo "[INFO] Searching recursively in: $SEARCH_ROOT"
+echo "[INFO] Indexing files in: $SEARCH_ROOT ..."
 
-# 親ノートから wikilink を抽出 (Windows改行コード除去)
+# --- 【高速化 1】 全ファイルのパスをメモリにマッピング ---
+# Bash 4.0以降の「連想配列」を使います (Git Bashは対応)
+declare -A FILE_MAP
+
+# findコマンドを1回だけ実行し、結果をループで配列に格納
+# プロセス起動回数を劇的に減らす
+while IFS= read -r FILE_PATH; do
+  # パスからファイル名(拡張子なし)を取り出す
+  BASENAME=$(basename "$FILE_PATH" .md)
+  FILE_MAP["$BASENAME"]="$FILE_PATH"
+done < <(find "$SEARCH_ROOT" -name "*.md")
+
+echo "[INFO] File indexing complete. Updating dashboard..."
+
+# 親ノートからリンク抽出
 LINKS=$(grep -o '\[\[[^]]*\]\]' "$PARENT_FILE" | sed 's/\[\[//g; s/\]\]//g' | tr -d '\r' || true)
 
 IFS=$'\n'
 for LINK in $LINKS; do
   LINK=$(echo "$LINK" | tr -d '\r\n')
   
-  # --- ファイル探索 (findコマンドで再帰検索) ---
-  # 指定フォルダ以下から、名前が一致する .md ファイルを探す
-  # head -n 1 で最初に見つかった1つだけを採用する（同名ファイル対策）
-  TARGET_FILE=$(find "$SEARCH_ROOT" -name "${LINK}.md" | head -n 1)
+  # --- 【高速化 2】 メモリからパスを即座に取得 ---
+  # findコマンドを使わず、配列から一瞬で取り出す
+  TARGET_FILE="${FILE_MAP[$LINK]}"
 
   if [[ -z "$TARGET_FILE" ]]; then
-    # echo "[WARN] Not found: ${LINK}.md (Skipping)"
     continue
   fi
 
-  # --- 子ノートからメタデータを抽出 ---
-  # Windows改行コード対策 (tr -d '\r') を継続
-  RES=$(grep "^st_result:" "$TARGET_FILE" | awk '{print $2}' | tr -d '\r' || true)
-  ATT=$(grep "^st_attempts:" "$TARGET_FILE" | awk '{print $2}' | tr -d '\r' || true)
-  LAST_DATE=$(grep "^st_last_solved:" "$TARGET_FILE" | awk '{print $2}' | tr -d '\r' || true)
-  DUE=$(grep "^due:" "$TARGET_FILE" | awk '{print $2}' | tr -d '\r' || true)
+  # --- 【高速化 3】 データの抽出を1回のawkプロセスで済ませる ---
+  # 以前は grep x 4 + awk x 4 = 8プロセスだったのを 1プロセスに削減
+  # Windowsの改行コード(\r)もここで除去
+  read -r RES ATT LAST DUE <<< $(awk '
+    BEGIN { r=""; a=""; l=""; d="" }
+    /^st_result:/ { sub(/\r$/, "", $2); r=$2 }
+    /^st_attempts:/ { sub(/\r$/, "", $2); a=$2 }
+    /^st_last_solved:/ { sub(/\r$/, "", $2); l=$2 }
+    /^due:/ { sub(/\r$/, "", $2); d=$2 }
+    END { print r, a, l, d }
+  ' "$TARGET_FILE")
 
-  # --- 表示パーツの組み立て ---
-  # 1. 結果マーク
+  # --- 表示パーツの組み立て (ここはBash内部処理なので速い) ---
   MARK="ーー"
   [[ "$RES" == "st-ok" ]] && MARK="✅"
   [[ "$RES" == "st-wrong" ]] && MARK="❌"
 
-  # 2. 回数
   ATT_DISP="(${ATT:-0}回)"
 
-  # 3. 最終実施日
   LAST_DISP=""
-  [[ -n "$LAST_DATE" ]] && LAST_DISP="@$LAST_DATE"
+  [[ -n "$LAST" ]] && LAST_DISP="@$LAST"
 
-  # 4. 期限
   DUE_DISP=""
   [[ -n "$DUE" ]] && DUE_DISP="due: $DUE"
 
@@ -75,11 +81,10 @@ for LINK in $LINKS; do
   NEW_STR="[[${LINK}]] ${MARK} ${ATT_DISP} ${LAST_DISP} ${DUE_DISP}"
   NEW_STR=$(echo "$NEW_STR" | sed 's/  */ /g' | sed 's/ *$//')
 
-  # sed実行
   sed -i "s|\[\[${LINK}\]\].*|${NEW_STR}|g" "$PARENT_FILE"
 
-  echo "[OK] Updated: $LINK (Found in: $TARGET_FILE)"
+  echo "[OK] Updated: $LINK"
 done
 
 echo "----------------------------------------"
-echo "完了！サブフォルダを含めて検索し、更新しました。"
+echo "完了！高速化版で更新しました。"
