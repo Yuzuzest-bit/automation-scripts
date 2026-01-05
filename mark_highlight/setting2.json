@@ -1,14 +1,13 @@
-  "((?:<!-- *)?(?:#|// @|//|./\\*+|<!--|--|\\* @|{!|{{!--|{{!) *TODO(?:\\s*\\([^)]+\\))?:?)((?!\\w)(?: *-->| *\\*/| *!}| *--}}| *}}|(?= *(?:[^:]//|/\\*+|<!--|@|--|{!|{{!--|{{!))|(?: +[^\\n@]*?)(?= *(?:[^:]//|/\\*+|<!--|@|--(?!>)|{!|{{!--|{{!))|(?: +[^@\\n]+)?))": {
-    "filterFileRegex": ".*(?<!CHANGELOG.md)$",
-    "decorations": [
-      {
-        "overviewRulerColor": "#ffcc00",
-        "backgroundColor": "#ffcc00",
-        "color": "#111111",
-        "fontWeight": "bold"
-      },
-      {
-        "backgroundColor": "#332a00"
-      }
-    ]
-  },
+"(^\\s*>.*$)": {
+  "filterLanguageRegex": "markdown|mdx",
+  "regexFlags": "gm",
+  "decorations": [
+    {
+      "isWholeLine": true,
+      "backgroundColor": "#1a261a",
+      "borderColor": "#31fa31",
+      "borderStyle": "solid",
+      "borderWidth": "0 0 0 4px"
+    }
+  ]
+},
