@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ------------------------------------------------------------
-# zk_update_fast.sh (Windows高速化版)
+# zk_update_fast_fix.sh (高速化・列ズレ修正版)
 # ------------------------------------------------------------
 
 export LANG=ja_JP.UTF-8
@@ -23,14 +23,11 @@ fi
 
 echo "[INFO] Indexing files in: $SEARCH_ROOT ..."
 
-# --- 【高速化 1】 全ファイルのパスをメモリにマッピング ---
-# Bash 4.0以降の「連想配列」を使います (Git Bashは対応)
+# --- 全ファイルのパスをメモリにマッピング (高速化の要) ---
 declare -A FILE_MAP
 
-# findコマンドを1回だけ実行し、結果をループで配列に格納
-# プロセス起動回数を劇的に減らす
+# findの結果をループ処理して連想配列に格納
 while IFS= read -r FILE_PATH; do
-  # パスからファイル名(拡張子なし)を取り出す
   BASENAME=$(basename "$FILE_PATH" .md)
   FILE_MAP["$BASENAME"]="$FILE_PATH"
 done < <(find "$SEARCH_ROOT" -name "*.md")
@@ -44,27 +41,27 @@ IFS=$'\n'
 for LINK in $LINKS; do
   LINK=$(echo "$LINK" | tr -d '\r\n')
   
-  # --- 【高速化 2】 メモリからパスを即座に取得 ---
-  # findコマンドを使わず、配列から一瞬で取り出す
+  # マッピングからパスを即座に取得
   TARGET_FILE="${FILE_MAP[$LINK]}"
 
   if [[ -z "$TARGET_FILE" ]]; then
     continue
   fi
 
-  # --- 【高速化 3】 データの抽出を1回のawkプロセスで済ませる ---
-  # 以前は grep x 4 + awk x 4 = 8プロセスだったのを 1プロセスに削減
-  # Windowsの改行コード(\r)もここで除去
-  read -r RES ATT LAST DUE <<< $(awk '
+  # --- 【修正ポイント】 区切り文字をパイプ(|)にしてズレを防止 ---
+  # データ読み込み時に空白ではなく | を区切りとして使う
+  # awkの printf "%s|%s..." が重要
+  
+  IFS='|' read -r RES ATT LAST DUE <<< $(awk '
     BEGIN { r=""; a=""; l=""; d="" }
     /^st_result:/ { sub(/\r$/, "", $2); r=$2 }
     /^st_attempts:/ { sub(/\r$/, "", $2); a=$2 }
     /^st_last_solved:/ { sub(/\r$/, "", $2); l=$2 }
     /^due:/ { sub(/\r$/, "", $2); d=$2 }
-    END { print r, a, l, d }
+    END { printf "%s|%s|%s|%s", r, a, l, d }
   ' "$TARGET_FILE")
 
-  # --- 表示パーツの組み立て (ここはBash内部処理なので速い) ---
+  # --- 表示パーツの組み立て ---
   MARK="ーー"
   [[ "$RES" == "st-ok" ]] && MARK="✅"
   [[ "$RES" == "st-wrong" ]] && MARK="❌"
@@ -87,4 +84,4 @@ for LINK in $LINKS; do
 done
 
 echo "----------------------------------------"
-echo "完了！高速化版で更新しました。"
+echo "完了！高速かつ正確に更新しました。"
