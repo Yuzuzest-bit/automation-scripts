@@ -1,38 +1,58 @@
 #!/usr/bin/env bash
-# 親ノートの [[link]] の右側に、戦績と期限を一括反映する
-# 形式: [[link]] ✅ (3回) @2025-12-30 due: 2026-01-05
+# ------------------------------------------------------------
+# zk_update_deep_search.sh
+# 使い方: ./script.sh [ダッシュボードファイル] [検索するルートフォルダ(任意)]
+# 例: ./script.sh dashboard/TREE_VIEW.md .
+# ------------------------------------------------------------
 
-# 日本語・絵文字文字化け防止
+# 文字化け防止
 export LANG=ja_JP.UTF-8
 
+# 引数1: ダッシュボードファイル (必須)
 PARENT_FILE="${1:-}"
 
 if [[ -z "$PARENT_FILE" || ! -f "$PARENT_FILE" ]]; then
-  echo "[ERR] Parent file not found."
+  echo "[ERR] Target dashboard file not found."
+  echo "Usage: $0 <dashboard_file> [search_root_dir]"
   exit 1
 fi
 
-ROOT="$(cd "$(dirname "$PARENT_FILE")" && pwd)"
+# 引数2: 検索を開始するルートフォルダ (任意)
+# 指定がなければ、ダッシュボードの「1つ上の階層」をデフォルトとする
+DEFAULT_ROOT="$(cd "$(dirname "$PARENT_FILE")/.." && pwd)"
+SEARCH_ROOT="${2:-$DEFAULT_ROOT}"
 
-# 親ノートから wikilink を抽出 (Windows改行コード除去を追加)
+if [[ ! -d "$SEARCH_ROOT" ]]; then
+  echo "[ERR] Search directory not found: $SEARCH_ROOT"
+  exit 1
+fi
+
+echo "[INFO] Dashboard: $PARENT_FILE"
+echo "[INFO] Searching recursively in: $SEARCH_ROOT"
+
+# 親ノートから wikilink を抽出 (Windows改行コード除去)
 LINKS=$(grep -o '\[\[[^]]*\]\]' "$PARENT_FILE" | sed 's/\[\[//g; s/\]\]//g' | tr -d '\r' || true)
-
-echo "[INFO] Syncing dashboard data to index..."
 
 IFS=$'\n'
 for LINK in $LINKS; do
   LINK=$(echo "$LINK" | tr -d '\r\n')
-  FILE_PATH="${ROOT}/${LINK}.md"
+  
+  # --- ファイル探索 (findコマンドで再帰検索) ---
+  # 指定フォルダ以下から、名前が一致する .md ファイルを探す
+  # head -n 1 で最初に見つかった1つだけを採用する（同名ファイル対策）
+  TARGET_FILE=$(find "$SEARCH_ROOT" -name "${LINK}.md" | head -n 1)
 
-  if [[ ! -f "$FILE_PATH" ]]; then
+  if [[ -z "$TARGET_FILE" ]]; then
+    # echo "[WARN] Not found: ${LINK}.md (Skipping)"
     continue
   fi
 
-  # 子ノートからメタデータを抽出 (Windows改行コード除去を追加)
-  RES=$(grep "^st_result:" "$FILE_PATH" | awk '{print $2}' | tr -d '\r' || true)
-  ATT=$(grep "^st_attempts:" "$FILE_PATH" | awk '{print $2}' | tr -d '\r' || true)
-  LAST_DATE=$(grep "^st_last_solved:" "$FILE_PATH" | awk '{print $2}' | tr -d '\r' || true)
-  DUE=$(grep "^due:" "$FILE_PATH" | awk '{print $2}' | tr -d '\r' || true)
+  # --- 子ノートからメタデータを抽出 ---
+  # Windows改行コード対策 (tr -d '\r') を継続
+  RES=$(grep "^st_result:" "$TARGET_FILE" | awk '{print $2}' | tr -d '\r' || true)
+  ATT=$(grep "^st_attempts:" "$TARGET_FILE" | awk '{print $2}' | tr -d '\r' || true)
+  LAST_DATE=$(grep "^st_last_solved:" "$TARGET_FILE" | awk '{print $2}' | tr -d '\r' || true)
+  DUE=$(grep "^due:" "$TARGET_FILE" | awk '{print $2}' | tr -d '\r' || true)
 
   # --- 表示パーツの組み立て ---
   # 1. 結果マーク
@@ -43,29 +63,23 @@ for LINK in $LINKS; do
   # 2. 回数
   ATT_DISP="(${ATT:-0}回)"
 
-  # 3. 最終実施日 (@記号付き)
+  # 3. 最終実施日
   LAST_DISP=""
-  if [[ -n "$LAST_DATE" ]]; then
-    LAST_DISP="@$LAST_DATE"
-  fi
+  [[ -n "$LAST_DATE" ]] && LAST_DISP="@$LAST_DATE"
 
-  # 4. 期限 (due: 記号付き)
+  # 4. 期限
   DUE_DISP=""
-  if [[ -n "$DUE" ]]; then
-    DUE_DISP="due: $DUE"
-  fi
+  [[ -n "$DUE" ]] && DUE_DISP="due: $DUE"
 
   # --- 親ノートの行を置換 ---
-  # リンクの右側を一旦リセットして再構築
   NEW_STR="[[${LINK}]] ${MARK} ${ATT_DISP} ${LAST_DISP} ${DUE_DISP}"
-  
-  # 余分なスペースを整形
   NEW_STR=$(echo "$NEW_STR" | sed 's/  */ /g' | sed 's/ *$//')
 
-  # 【重要】Windows (GNU sed) 用に -i "" を -i に変更
+  # sed実行
   sed -i "s|\[\[${LINK}\]\].*|${NEW_STR}|g" "$PARENT_FILE"
 
+  echo "[OK] Updated: $LINK (Found in: $TARGET_FILE)"
 done
 
 echo "----------------------------------------"
-echo "完了！ダッシュボードを更新しました。"
+echo "完了！サブフォルダを含めて検索し、更新しました。"
