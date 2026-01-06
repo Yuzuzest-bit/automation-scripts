@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# update_in_place.sh (Fixed: Aggressive cleanup of existing icons/text)
+# update_in_place.sh (Aggressive Prefix Clean)
 #
 
 [ -n "${BASH_VERSION-}" ] || exec bash "$0" "$@"
@@ -158,7 +158,6 @@ strip_paren_group_any() {
 # アイコン直後のテキスト（括弧または単語）を食う
 consume_prio_text_token() {
   local s="$1"
-  # ゴミ掃除
   while [[ "$s" == "$VS16"* ]]; do s="${s#"$VS16"}"; done
   s="$(ltrim_ws "$s")"
 
@@ -168,7 +167,6 @@ consume_prio_text_token() {
     return 0
   fi
 
-  # 括弧がない場合、次の空白までを「テキスト」とみなして食う
   while [[ -n "$s" ]]; do
     case "$s" in
       " "*|$'\t'*|$'\r'*|$'\n'*|$'\v'*|$'\f'*|"$FWSP"*) break ;;
@@ -178,23 +176,17 @@ consume_prio_text_token() {
   printf '%s' "$s"
 }
 
-# helper: check if s starts with icon (ignoring VS16 in s)
 starts_with_icon() {
   local str="$1"
   local icon="$2"
-  # 純粋な一致
   [[ "$str" == "$icon"* ]] && return 0
-  # VS16付きの一致 (str側にVS16がある場合)
   [[ "$str" == "${icon}${VS16}"* ]] && return 0
-  # icon側に空白があり、str側でそれが欠けている場合などは呼び出し元でループ処理する
   return 1
 }
 
-# remove specific icon from head of s (handling VS16)
 strip_icon_head() {
   local str="$1"
   local icon="$2"
-  
   if [[ "$str" == "${icon}${VS16}"* ]]; then
     printf '%s' "${str#"${icon}${VS16}"}"
   elif [[ "$str" == "$icon"* ]]; then
@@ -204,40 +196,53 @@ strip_icon_head() {
   fi
 }
 
+# ★【新機能】行頭の構造（インデント＋リスト記号）だけを抽出し、それ以外を捨てる
+extract_list_structure() {
+  local s="$1"
+  # パターン: 空白 + (- or * or +) + 空白
+  if [[ "$s" =~ ^([[:space:]]*[-*+][[:space:]]+) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return
+  fi
+  # パターン: 空白 + 数字. + 空白
+  if [[ "$s" =~ ^([[:space:]]*[0-9]+\.[[:space:]]+) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return
+  fi
+  # パターン: ただのインデントのみ（リスト記号なし）
+  if [[ "$s" =~ ^([[:space:]]*) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return
+  fi
+  
+  # 全く構造がない場合（行頭から文字など）は、リクエスト通り「全部消す」なら空を返す
+  # しかし安全のため、インデントがない場合は空文字を返す＝左側全消去
+  printf ''
+}
+
 clean_prefix_segment() {
   local s="$1"
   local changed=1
-  
-  # 削除対象のアイコンリスト (スペース除去版も作るため、ここでは元の定義を使う)
   local icons=(
     "$ICON_CLOSED" "$ICON_OPEN" "$ICON_ERROR"
     "$ICON_MINUTES_NOTE" "$ICON_DECISION_NOTE"
     "$ICON_ACCEPT" "$ICON_REJECT" "$ICON_SUPER" "$ICON_DROP" "$ICON_PROPOSE"
   )
-
   while (( changed )); do
     changed=0
     s="$(ltrim_ws "$s")"
-    
     for icon_raw in "${icons[@]}"; do
-      # スペースあり版と、なし版の両方でチェック
       local icon_nosp="${icon_raw% }"
-      
       if starts_with_icon "$s" "$icon_raw"; then
         s="$(strip_icon_head "$s" "$icon_raw")"
-        changed=1
-        break
+        changed=1; break
       elif starts_with_icon "$s" "$icon_nosp"; then
         s="$(strip_icon_head "$s" "$icon_nosp")"
-        changed=1
-        break
+        changed=1; break
       fi
     done
   done
-
-  # 残ったVS16単体があれば消す
   while [[ "$s" == "$VS16"* ]]; do s="${s#"$VS16"}"; done
-  
   printf '%s' "$s"
 }
 
@@ -246,7 +251,6 @@ consume_auto_suffix() {
   local s="$orig"
   local had_ws=0 removed=0 progressed=0
   
-  # 元の文字列に空白があったか記録（再構築時にスペースを入れるため）
   case "$s" in
     " "*|$'\t'*|"$FWSP"*) had_ws=1;;
   esac
@@ -255,28 +259,19 @@ consume_auto_suffix() {
 
   while :; do
     progressed=0
-
-    # 1. Status Icons (⏳, 🧱, 🎯) + Optional Text
-    #    VS16や、その後のテキストもまとめて食う
     for icon in "⏳" "🧱" "🎯"; do
       if starts_with_icon "$s" "$icon"; then
         removed=1; progressed=1
         s="$(strip_icon_head "$s" "$icon")"
-        
-        # アイコン後のゴミ掃除
         while [[ "$s" == "$VS16"* ]]; do s="${s#"$VS16"}"; done
         s="$(ltrim_ws "$s")"
-        
-        # 直後にテキストがあればそれもメタデータの一部として食う
-        # (括弧書き、または次の空白までの単語)
         s="$(consume_prio_text_token "$s")"
         s="$(ltrim_ws "$s")"
-        break # loop restart to find next icon
+        break
       fi
     done
     (( progressed )) && continue
 
-    # 2. Arrow part: (→ ... )
     if [[ "$s" == \(→* || "$s" == （→* ]]; then
       removed=1; progressed=1
       s="$(strip_paren_group_any "$s")"
@@ -291,7 +286,6 @@ consume_auto_suffix() {
     printf '%s' ""
     return 0
   fi
-
   if (( had_ws || removed )); then
     printf ' %s' "$s"
   else
@@ -316,38 +310,27 @@ dbg "Indexing md files..."
 FILE_COUNT=0
 while IFS= read -r -d '' f; do
   [[ -f "$f" ]] || continue
-
   if [[ "${#PRUNE_ARR[@]}" -gt 0 ]]; then
     skip=0
     for d in "${PRUNE_ARR[@]}"; do
       d="$(trim_ws_basic "$d")"
       [[ -z "$d" ]] && continue
-      if [[ "$f" == *"/$d/"* ]]; then
-        skip=1
-        break
-      fi
+      if [[ "$f" == *"/$d/"* ]]; then skip=1; break; fi
     done
     (( skip == 1 )) && continue
   fi
-
   base="${f##*/}"
   base_no_ext="${base%.md}"
-
   [[ -z "${FILE_MAP["$base_no_ext"]+x}" ]] && FILE_MAP["$base_no_ext"]="$f"
   [[ -z "${FILE_MAP_MD["$base"]+x}" ]] && FILE_MAP_MD["$base"]="$f"
   FILE_COUNT=$((FILE_COUNT+1))
 done < "$LIST_TMP"
-
 rm -f "$LIST_TMP" 2>/dev/null || true
-
 (( FILE_COUNT > 0 )) || { echo "[ERR] vault scan returned 0 md files." >&2; exit 1; }
 
 resolve_file_path_fast() {
   local filename="$1"
-  if [[ -f "$PARENT_DIR/$filename" ]]; then
-    printf '%s\n' "$PARENT_DIR/$filename"
-    return 0
-  fi
+  if [[ -f "$PARENT_DIR/$filename" ]]; then printf '%s\n' "$PARENT_DIR/$filename"; return 0; fi
   if [[ "$filename" == *.md ]]; then
     local p="${FILE_MAP_MD["$filename"]:-}"
     [[ -n "$p" ]] && { printf '%s\n' "$p"; return 0; }
@@ -399,7 +382,7 @@ scan_meta() {
       if(t ~ /^closed:[ \t]*/){ closed=1 }
       if(t ~ /^decision:[ \t]*/){ sub(/^decision:[ \t]*/, "", t); decision=tolower_ascii(trim(t)) }
       if(t ~ /^superseded_by:[ \t]*/){ sub(/^superseded_by:[ \t]*/, "", t); sup_by=strip_quotes(t) }
-      if(t ~ /minutes/){ is_minutes=1 } # 簡易判定(tagsの中身まで厳密に見なくても一旦OKとする)
+      if(t ~ /minutes/){ is_minutes=1 }
       next
     }
     low=tolower(line)
@@ -475,7 +458,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     inside="${after_open%%]]*}"
     after_close="${after_open#*]]}"
 
-    # ★ Suffix Cleanup: Aggressively consume existing icons/text
+    # Suffix Cleanup
     after_close="$(consume_auto_suffix "$after_close")"
 
     link_target="$inside"
@@ -488,11 +471,13 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     target_filepart="${link_target%%#*}"
     target_filepart="$(trim_ws_basic "$target_filepart")"
 
-    # ★ Prefix Cleanup: Iteratively consume existing icons
+    # ★ Prefix Cleanup: Aggressive
     if (( first_link_in_line )); then
-      pre_clean="$(clean_prefix_segment "$pre")"
+      # 行の最初のリンクなら、インデントと記号だけ残してあとは問答無用で消す
+      pre_clean="$(extract_list_structure "$pre")"
       first_link_in_line=0
     else
+      # 2つ目以降のリンクは、単語などを消すと文がおかしくなるので従来のアイコン削除のみ
       pre_clean="$(clean_prefix_segment "$pre")"
     fi
 
