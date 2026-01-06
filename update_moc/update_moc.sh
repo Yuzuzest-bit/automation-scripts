@@ -155,6 +155,26 @@ trim_ws_basic() {
 
 # ★ここが今回のエラー対策（trim_ws 未定義を潰す）
 trim_ws() { trim_ws_basic "$1"; }
+
+# ★追加：先頭インデント（空白/タブ/全角スペース等）だけを抽出して返す
+leading_ws() {
+  local s="$1"
+  local out=""
+  while :; do
+    case "$s" in
+      " "*)      out+=" ";      s="${s# }" ;;
+      $'\t'*)    out+=$'\t';    s="${s#$'\t'}" ;;
+      $'\r'*)    out+=$'\r';    s="${s#$'\r'}" ;;
+      $'\n'*)    out+=$'\n';    s="${s#$'\n'}" ;;
+      $'\v'*)    out+=$'\v';    s="${s#$'\v'}" ;;
+      $'\f'*)    out+=$'\f';    s="${s#$'\f'}" ;;
+      "$FWSP"*)  out+="$FWSP";  s="${s#"$FWSP"}" ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 # prioアイコン直後の「説明文字」も剥がす
 # - "(...)" / "（...）" があればそれを消す
 # - 無ければ「次の空白まで」を1トークンとして消す（⏳待ち 等を想定）
@@ -184,7 +204,6 @@ consume_prio_text_token() {
   done
   printf '%s' "$s"
 }
-
 
 # "(...)" / "（...）" を最初の閉じ括弧まで食う（安全）
 strip_paren_group_any() {
@@ -570,6 +589,9 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   rest="$line"
   out=""
 
+  # ★追加：この行の「最初の wikilink」だけ、行頭〜[[ を全消し（インデントだけ残す）
+  first_link_in_line=1
+
   while [[ "$rest" == *\[\[* ]]; do
     pre="${rest%%\[\[*}"
     after_open="${rest#*\[\[}"
@@ -595,7 +617,15 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     target_filepart="${link_target%%#*}"
     target_filepart="$(trim_ws_basic "$target_filepart")"
 
-    pre_clean="$(clean_prefix_segment "$pre")"
+    # ★ここが変更点
+    # - 行頭の最初の[[の左側は「インデントだけ」残して完全に捨てる
+    # - 2つ目以降は従来通り（間のテキストは残す）
+    if (( first_link_in_line )); then
+      pre_clean="$(leading_ws "$pre")"
+      first_link_in_line=0
+    else
+      pre_clean="$(clean_prefix_segment "$pre")"
+    fi
 
     if [[ -z "$target_filepart" ]]; then
       out+="$pre_clean[[${inside}]]"
