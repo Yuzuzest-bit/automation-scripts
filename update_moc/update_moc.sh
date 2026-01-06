@@ -514,10 +514,35 @@ scan_meta() {
       }
     }
 
-    low=tolower(line)
-    if(a_txt=="" && low ~ /@awaiting/){ a_txt=line; sub(/.*@awaiting[[:space:]]*/, "", a_txt); a_txt=trim(a_txt) }
-    if(b_txt=="" && low ~ /@blocked/ ){ b_txt=line; sub(/.*@blocked[[:space:]]*/,  "", b_txt); b_txt=trim(b_txt) }
-    if(f_txt=="" && low ~ /@focus/   ){ f_txt=line; sub(/.*@focus[[:space:]]*/,    "", f_txt); f_txt=trim(f_txt) }
+low=tolower(line)
+
+# まだ何も選ばれていない時だけ、「最初に現れたもの」を採用する
+if(prio_set==0){
+  pa=index(low,"@awaiting")
+  pb=index(low,"@blocked")
+  pf=index(low,"@focus")
+
+  best=0
+  tag=""
+  if(pa>0 && (best==0 || pa<best)){ best=pa; tag="awaiting" }
+  if(pb>0 && (best==0 || pb<best)){ best=pb; tag="blocked" }
+  if(pf>0 && (best==0 || pf<best)){ best=pf; tag="focus" }
+
+  if(best>0){
+    tmp=line
+    if(tag=="awaiting"){
+      prio_icon="⏳"
+      sub(/.*@awaiting[[:space:]]*/, "", tmp)
+    } else if(tag=="blocked"){
+      prio_icon="🧱"
+      sub(/.*@blocked[[:space:]]*/, "", tmp)
+    } else if(tag=="focus"){
+      prio_icon="🎯"
+      sub(/.*@focus[[:space:]]*/, "", tmp)
+    }
+    prio_text=trim(tmp)
+    prio_set=1
+  }
   }
 
   END{
@@ -535,12 +560,13 @@ scan_meta() {
       else dec=iprp
     }
 
-    prio=""; text=""
-    if(!(decision ~ /^(accepted|rejected|superseded|dropped)$/)){
-      if(a_txt!=""){ prio="⏳"; text=a_txt }
-      else if(b_txt!=""){ prio="🧱"; text=b_txt }
-      else if(f_txt!=""){ prio="🎯"; text=f_txt }
-    }
+prio=""; text=""
+if(!(decision ~ /^(accepted|rejected|superseded|dropped)$/)){
+  if(prio_set==1){
+    prio=prio_icon
+    text=prio_text
+  }
+}
 
     arrow=""
     if(decision=="superseded" && sup_by!=""){ arrow=sup_by }
