@@ -153,10 +153,8 @@ trim_ws_basic() {
   printf '%s' "$s"
 }
 
-# ★ここが今回のエラー対策（trim_ws 未定義を潰す）
 trim_ws() { trim_ws_basic "$1"; }
 
-# ★追加：先頭インデント（空白/タブ/全角スペース等）だけを抽出して返す
 leading_ws() {
   local s="$1"
   local out=""
@@ -175,27 +173,21 @@ leading_ws() {
   printf '%s' "$out"
 }
 
-# prioアイコン直後の「説明文字」も剥がす
-# - "(...)" / "（...）" があればそれを消す
-# - 無ければ「次の空白まで」を1トークンとして消す（⏳待ち 等を想定）
 consume_prio_text_token() {
   local s="$1"
 
-  # 先頭のVS16ゴミを掃除
   while [[ "$s" == "$VS16"* ]]; do
     s="${s#"$VS16"}"
   done
 
   s="$(ltrim_ws "$s")"
 
-  # 括弧があれば括弧ごと捨てる
   if [[ "$s" == \(* || "$s" == （* ]]; then
     s="$(strip_paren_group_any "$s")"
     printf '%s' "$s"
     return 0
   fi
 
-  # 括弧なし → 次の空白までを捨てる（日本語でも空白まで）
   while [[ -n "$s" ]]; do
     case "$s" in
       " "*|$'\t'*|$'\r'*|$'\n'*|$'\v'*|$'\f'*|"$FWSP"*) break ;;
@@ -205,7 +197,6 @@ consume_prio_text_token() {
   printf '%s' "$s"
 }
 
-# "(...)" / "（...）" を最初の閉じ括弧まで食う（安全）
 strip_paren_group_any() {
   local s="$1"
   case "$s" in
@@ -254,32 +245,26 @@ consume_auto_suffix() {
   while :; do
     progressed=0
 
-    # prio marks: ⏳ / 🧱 / 🎯（VS16 “️” 付きも含む）
     if [[ "$s" == ⏳* || "$s" == 🧱* || "$s" == 🎯* ]]; then
       removed=1; progressed=1
 
-      # アイコン本体を剥がす（VS16付きも対応）
       if   [[ "$s" == ⏳$VS16* ]]; then s="${s#⏳$VS16}"
-      elif [[ "$s" == ⏳*      ]]; then s="${s#⏳}"
+      elif [[ "$s" == ⏳* ]]; then s="${s#⏳}"
       elif [[ "$s" == 🧱$VS16* ]]; then s="${s#🧱$VS16}"
-      elif [[ "$s" == 🧱*      ]]; then s="${s#🧱}"
+      elif [[ "$s" == 🧱* ]]; then s="${s#🧱}"
       elif [[ "$s" == 🎯$VS16* ]]; then s="${s#🎯$VS16}"
-      elif [[ "$s" == 🎯*      ]]; then s="${s#🎯}"
+      elif [[ "$s" == 🎯* ]]; then s="${s#🎯}"
       fi
 
-      # アイコン直後に残るVS16単体も掃除
       while [[ "$s" == "$VS16"* ]]; do
         s="${s#"$VS16"}"
       done
 
       s="$(ltrim_ws "$s")"
-
-      # ★ここが追加：絵文字の横の「文字」も剥がす（括弧 or 1トークン）
       s="$(consume_prio_text_token "$s")"
       s="$(ltrim_ws "$s")"
     fi
 
-    # arrow part: (→ ... ) / （→ ...）
     if [[ "$s" == \(→* || "$s" == （→* ]]; then
       removed=1; progressed=1
       s="$(strip_paren_group_any "$s")"
@@ -309,7 +294,6 @@ consume_auto_suffix() {
     return 0
   fi
 
-  # もともと空白があった or 何か剥がしたなら区切り空白1個を付ける
   if (( had_ws || removed )); then
     printf ' %s' "$s"
   else
@@ -514,40 +498,39 @@ scan_meta() {
       }
     }
 
-low=tolower(line)
+    low=tolower(line)
 
-# まだ何も選ばれていない時だけ、「最初に現れたもの」を採用する
-if(prio_set==0){
-  pa=index(low,"@awaiting")
-  pb=index(low,"@blocked")
-  pf=index(low,"@focus")
+    if(prio_set==0){
+      pa=index(low,"@awaiting")
+      pb=index(low,"@blocked")
+      pf=index(low,"@focus")
 
-  best=0
-  tag=""
-  if(pa>0 && (best==0 || pa<best)){ best=pa; tag="awaiting" }
-  if(pb>0 && (best==0 || pb<best)){ best=pb; tag="blocked" }
-  if(pf>0 && (best==0 || pf<best)){ best=pf; tag="focus" }
+      best=0
+      tag=""
+      if(pa>0 && (best==0 || pa<best)){ best=pa; tag="awaiting" }
+      if(pb>0 && (best==0 || pb<best)){ best=pb; tag="blocked" }
+      if(pf>0 && (best==0 || pf<best)){ best=pf; tag="focus" }
 
-  if(best>0){
-    tmp=line
-    if(tag=="awaiting"){
-      prio_icon="⏳"
-      sub(/.*@awaiting[[:space:]]*/, "", tmp)
-    } else if(tag=="blocked"){
-      prio_icon="🧱"
-      sub(/.*@blocked[[:space:]]*/, "", tmp)
-    } else if(tag=="focus"){
-      prio_icon="🎯"
-      sub(/.*@focus[[:space:]]*/, "", tmp)
+      if(best>0){
+        tmp=line
+        if(tag=="awaiting"){
+          prio_icon="⏳"
+          sub(/.*@awaiting[[:space:]]*/, "", tmp)
+        } else if(tag=="blocked"){
+          prio_icon="🧱"
+          sub(/.*@blocked[[:space:]]*/, "", tmp)
+        } else if(tag=="focus"){
+          prio_icon="🎯"
+          sub(/.*@focus[[:space:]]*/, "", tmp)
+        }
+        prio_text=trim(tmp)
+        prio_set=1
+      }
     }
-    prio_text=trim(tmp)
-    prio_set=1
-  }
-  }
+  } # <--- ★FIX: メインループの閉じ括弧が抜けていたのを修正
 
   END{
     life = (closed?ic:io)
-
     min = (is_minutes?imin:"")
     kind = (decision!="" ? idec : "")
 
@@ -560,13 +543,13 @@ if(prio_set==0){
       else dec=iprp
     }
 
-prio=""; text=""
-if(!(decision ~ /^(accepted|rejected|superseded|dropped)$/)){
-  if(prio_set==1){
-    prio=prio_icon
-    text=prio_text
-  }
-}
+    prio=""; text=""
+    if(!(decision ~ /^(accepted|rejected|superseded|dropped)$/)){
+      if(prio_set==1){
+        prio=prio_icon
+        text=prio_text
+      }
+    }
 
     arrow=""
     if(decision=="superseded" && sup_by!=""){ arrow=sup_by }
@@ -614,8 +597,6 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 
   rest="$line"
   out=""
-
-  # ★追加：この行の「最初の wikilink」だけ、行頭〜[[ を全消し（インデントだけ残す）
   first_link_in_line=1
 
   while [[ "$rest" == *\[\[* ]]; do
@@ -643,11 +624,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     target_filepart="${link_target%%#*}"
     target_filepart="$(trim_ws_basic "$target_filepart")"
 
-    # ★ここが変更点
-    # - 行頭の最初の[[の左側は「インデントだけ」残して完全に捨てる
-    # - 2つ目以降は従来通り（間のテキストは残す）
     if (( first_link_in_line )); then
-      pre_clean="$(leading_ws "$pre")"
+      # ★FIX: leading_wsを使うと箇条書きの「- 」や「* 」まで消えてしまうため、
+      # 以前のアイコンだけ消去する安全なclean_prefix_segmentに戻しました。
+      # もしテキストも消したい場合は、リスト記号を保護するロジックが必要です。
+      pre_clean="$(clean_prefix_segment "$pre")"
       first_link_in_line=0
     else
       pre_clean="$(clean_prefix_segment "$pre")"
