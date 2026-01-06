@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-# update_in_place.sh (FAST + idempotent, no growth)
-#
-# Optional env:
-#   ZK_DEBUG=1
-#   ZK_TRACE=1
-#   ZK_TRACE_MAX=80
-#   ZK_PRUNE_DIRS="attachments,exports,archive,node_modules"
+# update_in_place.sh (Fixed: Aggressive cleanup of existing icons/text)
 #
 
 [ -n "${BASH_VERSION-}" ] || exec bash "$0" "$@"
@@ -21,6 +15,7 @@ trap 'rc=$?; printf "[ERR] exit=%d line=%d cmd=%s\n" "$rc" "$LINENO" "$BASH_COMM
 
 TARGET_FILE="${1:-}"
 
+# --- Icons ---
 ICON_CLOSED="✅ "
 ICON_OPEN="📖 "
 ICON_ERROR="⚠️ "
@@ -42,7 +37,7 @@ ZK_TRACE="${ZK_TRACE:-0}"
 ZK_TRACE_MAX="${ZK_TRACE_MAX:-30}"
 _trace_n=0
 
-VS16=$'\uFE0F'   # "️"
+VS16=$'\uFE0F'
 
 hex_head() {
   printf '%s' "$1" | LC_ALL=C od -An -tx1 -v 2>/dev/null | tr -d ' \n' | cut -c1-96
@@ -58,7 +53,7 @@ ZK_DEBUG="${ZK_DEBUG:-0}"
 dbg(){ if [[ "${ZK_DEBUG}" != 0 ]]; then printf '[DBG] %s\n' "$*" >&2; fi; }
 
 if (( BASH_VERSINFO[0] < 4 )); then
-  echo "[ERR] bash >= 4 required. Please run with Git Bash / MSYS2 bash 4+." >&2
+  echo "[ERR] bash >= 4 required." >&2
   exit 2
 fi
 
@@ -103,9 +98,6 @@ detect_root() {
 }
 
 VAULT_ROOT="$(detect_root)"
-dbg "TARGET_FILE=$TARGET_FILE"
-dbg "PARENT_DIR=$PARENT_DIR"
-dbg "VAULT_ROOT=$VAULT_ROOT"
 
 OS_NAME="$(uname)"
 STAT_CMD=(stat -c %Y)
@@ -114,7 +106,7 @@ if [[ "$OS_NAME" == "Darwin" ]]; then
 fi
 
 # -----------------------------
-# string utils (no ${s:0:1})
+# String Utils
 # -----------------------------
 FWSP=$'\u3000'
 
@@ -144,8 +136,6 @@ trim_ws_basic() {
       *$'\t')    s="${s%$'\t'}" ;;
       *$'\r')    s="${s%$'\r'}" ;;
       *$'\n')    s="${s%$'\n'}" ;;
-      *$'\v')    s="${s%$'\v'}" ;;
-      *$'\f')    s="${s%$'\f'}" ;;
       *"$FWSP")  s="${s%$FWSP}" ;;
       *) break ;;
     esac
@@ -155,48 +145,7 @@ trim_ws_basic() {
 
 trim_ws() { trim_ws_basic "$1"; }
 
-leading_ws() {
-  local s="$1"
-  local out=""
-  while :; do
-    case "$s" in
-      " "*)      out+=" ";      s="${s# }" ;;
-      $'\t'*)    out+=$'\t';    s="${s#$'\t'}" ;;
-      $'\r'*)    out+=$'\r';    s="${s#$'\r'}" ;;
-      $'\n'*)    out+=$'\n';    s="${s#$'\n'}" ;;
-      $'\v'*)    out+=$'\v';    s="${s#$'\v'}" ;;
-      $'\f'*)    out+=$'\f';    s="${s#$'\f'}" ;;
-      "$FWSP"*)  out+="$FWSP";  s="${s#"$FWSP"}" ;;
-      *) break ;;
-    esac
-  done
-  printf '%s' "$out"
-}
-
-consume_prio_text_token() {
-  local s="$1"
-
-  while [[ "$s" == "$VS16"* ]]; do
-    s="${s#"$VS16"}"
-  done
-
-  s="$(ltrim_ws "$s")"
-
-  if [[ "$s" == \(* || "$s" == （* ]]; then
-    s="$(strip_paren_group_any "$s")"
-    printf '%s' "$s"
-    return 0
-  fi
-
-  while [[ -n "$s" ]]; do
-    case "$s" in
-      " "*|$'\t'*|$'\r'*|$'\n'*|$'\v'*|$'\f'*|"$FWSP"*) break ;;
-      *) s="${s:1}" ;;
-    esac
-  done
-  printf '%s' "$s"
-}
-
+# 括弧の中身を安全に食う
 strip_paren_group_any() {
   local s="$1"
   case "$s" in
@@ -206,28 +155,89 @@ strip_paren_group_any() {
   esac
 }
 
+# アイコン直後のテキスト（括弧または単語）を食う
+consume_prio_text_token() {
+  local s="$1"
+  # ゴミ掃除
+  while [[ "$s" == "$VS16"* ]]; do s="${s#"$VS16"}"; done
+  s="$(ltrim_ws "$s")"
+
+  if [[ "$s" == \(* || "$s" == （* ]]; then
+    s="$(strip_paren_group_any "$s")"
+    printf '%s' "$s"
+    return 0
+  fi
+
+  # 括弧がない場合、次の空白までを「テキスト」とみなして食う
+  while [[ -n "$s" ]]; do
+    case "$s" in
+      " "*|$'\t'*|$'\r'*|$'\n'*|$'\v'*|$'\f'*|"$FWSP"*) break ;;
+      *) s="${s:1}" ;;
+    esac
+  done
+  printf '%s' "$s"
+}
+
+# helper: check if s starts with icon (ignoring VS16 in s)
+starts_with_icon() {
+  local str="$1"
+  local icon="$2"
+  # 純粋な一致
+  [[ "$str" == "$icon"* ]] && return 0
+  # VS16付きの一致 (str側にVS16がある場合)
+  [[ "$str" == "${icon}${VS16}"* ]] && return 0
+  # icon側に空白があり、str側でそれが欠けている場合などは呼び出し元でループ処理する
+  return 1
+}
+
+# remove specific icon from head of s (handling VS16)
+strip_icon_head() {
+  local str="$1"
+  local icon="$2"
+  
+  if [[ "$str" == "${icon}${VS16}"* ]]; then
+    printf '%s' "${str#"${icon}${VS16}"}"
+  elif [[ "$str" == "$icon"* ]]; then
+    printf '%s' "${str#"$icon"}"
+  else
+    printf '%s' "$str"
+  fi
+}
+
 clean_prefix_segment() {
   local s="$1"
-  local icon icon_no_vs icon_no_vs_nospace icon_nospace
-
-  for icon in \
-    "$ICON_CLOSED" "$ICON_OPEN" "$ICON_ERROR" \
-    "$ICON_MINUTES_NOTE" "$ICON_DECISION_NOTE" \
+  local changed=1
+  
+  # 削除対象のアイコンリスト (スペース除去版も作るため、ここでは元の定義を使う)
+  local icons=(
+    "$ICON_CLOSED" "$ICON_OPEN" "$ICON_ERROR"
+    "$ICON_MINUTES_NOTE" "$ICON_DECISION_NOTE"
     "$ICON_ACCEPT" "$ICON_REJECT" "$ICON_SUPER" "$ICON_DROP" "$ICON_PROPOSE"
-  do
-    s="${s//$icon/}"
+  )
 
-    icon_nospace="${icon% }"
-    [[ "$icon_nospace" != "$icon" ]] && s="${s//$icon_nospace/}"
-
-    icon_no_vs="${icon//$VS16/}"
-    [[ "$icon_no_vs" != "$icon" ]] && s="${s//$icon_no_vs/}"
-
-    icon_no_vs_nospace="${icon_no_vs% }"
-    [[ "$icon_no_vs_nospace" != "$icon_no_vs" ]] && s="${s//$icon_no_vs_nospace/}"
+  while (( changed )); do
+    changed=0
+    s="$(ltrim_ws "$s")"
+    
+    for icon_raw in "${icons[@]}"; do
+      # スペースあり版と、なし版の両方でチェック
+      local icon_nosp="${icon_raw% }"
+      
+      if starts_with_icon "$s" "$icon_raw"; then
+        s="$(strip_icon_head "$s" "$icon_raw")"
+        changed=1
+        break
+      elif starts_with_icon "$s" "$icon_nosp"; then
+        s="$(strip_icon_head "$s" "$icon_nosp")"
+        changed=1
+        break
+      fi
+    done
   done
 
-  s="${s//$VS16/}"
+  # 残ったVS16単体があれば消す
+  while [[ "$s" == "$VS16"* ]]; do s="${s#"$VS16"}"; done
+  
   printf '%s' "$s"
 }
 
@@ -235,7 +245,8 @@ consume_auto_suffix() {
   local orig="$1"
   local s="$orig"
   local had_ws=0 removed=0 progressed=0
-
+  
+  # 元の文字列に空白があったか記録（再構築時にスペースを入れるため）
   case "$s" in
     " "*|$'\t'*|"$FWSP"*) had_ws=1;;
   esac
@@ -245,49 +256,36 @@ consume_auto_suffix() {
   while :; do
     progressed=0
 
-    if [[ "$s" == ⏳* || "$s" == 🧱* || "$s" == 🎯* ]]; then
-      removed=1; progressed=1
-
-      if   [[ "$s" == ⏳$VS16* ]]; then s="${s#⏳$VS16}"
-      elif [[ "$s" == ⏳* ]]; then s="${s#⏳}"
-      elif [[ "$s" == 🧱$VS16* ]]; then s="${s#🧱$VS16}"
-      elif [[ "$s" == 🧱* ]]; then s="${s#🧱}"
-      elif [[ "$s" == 🎯$VS16* ]]; then s="${s#🎯$VS16}"
-      elif [[ "$s" == 🎯* ]]; then s="${s#🎯}"
+    # 1. Status Icons (⏳, 🧱, 🎯) + Optional Text
+    #    VS16や、その後のテキストもまとめて食う
+    for icon in "⏳" "🧱" "🎯"; do
+      if starts_with_icon "$s" "$icon"; then
+        removed=1; progressed=1
+        s="$(strip_icon_head "$s" "$icon")"
+        
+        # アイコン後のゴミ掃除
+        while [[ "$s" == "$VS16"* ]]; do s="${s#"$VS16"}"; done
+        s="$(ltrim_ws "$s")"
+        
+        # 直後にテキストがあればそれもメタデータの一部として食う
+        # (括弧書き、または次の空白までの単語)
+        s="$(consume_prio_text_token "$s")"
+        s="$(ltrim_ws "$s")"
+        break # loop restart to find next icon
       fi
+    done
+    (( progressed )) && continue
 
-      while [[ "$s" == "$VS16"* ]]; do
-        s="${s#"$VS16"}"
-      done
-
-      s="$(ltrim_ws "$s")"
-      s="$(consume_prio_text_token "$s")"
-      s="$(ltrim_ws "$s")"
-    fi
-
+    # 2. Arrow part: (→ ... )
     if [[ "$s" == \(→* || "$s" == （→* ]]; then
       removed=1; progressed=1
       s="$(strip_paren_group_any "$s")"
       s="$(ltrim_ws "$s")"
     fi
+    (( progressed )) && continue
 
-    (( progressed )) || break
+    break
   done
-
-  if (( ZK_TRACE )); then
-    local t t2
-    t="$(ltrim_ws "$orig")"
-    if [[ "$t" == ⏳* || "$t" == 🧱* || "$t" == 🎯* || "$t" == \(→* || "$t" == （→* ]]; then
-      t2="$(ltrim_ws "$s")"
-      if [[ "$t2" == ⏳* || "$t2" == 🧱* || "$t2" == 🎯* || "$t2" == \(→* || "$t2" == （→* ]]; then
-        trace "suffix NOT fully consumed"
-        trace "  raw(head) : $(printf '%s' "$orig" | head -c 80)"
-        trace "  left(head): $(printf '%s' "$s" | head -c 80)"
-        trace "  raw(hex)  : $(hex_head "$orig")"
-        trace "  left(hex) : $(hex_head "$s")"
-      fi
-    fi
-  fi
 
   if [[ -z "$s" ]]; then
     printf '%s' ""
@@ -342,8 +340,7 @@ done < "$LIST_TMP"
 
 rm -f "$LIST_TMP" 2>/dev/null || true
 
-(( FILE_COUNT > 0 )) || { echo "[ERR] vault scan returned 0 md files. VAULT_ROOT is wrong?" >&2; exit 1; }
-dbg "Indexed md count=$FILE_COUNT"
+(( FILE_COUNT > 0 )) || { echo "[ERR] vault scan returned 0 md files." >&2; exit 1; }
 
 resolve_file_path_fast() {
   local filename="$1"
@@ -351,7 +348,6 @@ resolve_file_path_fast() {
     printf '%s\n' "$PARENT_DIR/$filename"
     return 0
   fi
-
   if [[ "$filename" == *.md ]]; then
     local p="${FILE_MAP_MD["$filename"]:-}"
     [[ -n "$p" ]] && { printf '%s\n' "$p"; return 0; }
@@ -364,7 +360,6 @@ resolve_file_path_fast() {
     p="${FILE_MAP_MD["$filename.md"]:-}"
     [[ -n "$p" ]] && { printf '%s\n' "$p"; return 0; }
   fi
-
   printf '%s\n' ""
 }
 
@@ -381,182 +376,53 @@ scan_meta() {
     -v imin="$ICON_MINUTES_NOTE" \
     -v idec="$ICON_DECISION_NOTE" \
     -v iacc="$ICON_ACCEPT" -v irej="$ICON_REJECT" -v isup="$ICON_SUPER" -v idrp="$ICON_DROP" -v iprp="$ICON_PROPOSE" '
-  function norm_ws(s){ gsub(/　/, " ", s); return s }
-  function trim(s){
-    s = norm_ws(s)
-    sub(/^\xef\xbb\xbf/, "", s)
-    gsub(/\r/, "", s)
-    gsub(/^[ \t]+|[ \t]+$/, "", s)
-    return s
-  }
-  function strip_quotes(v){
-    v=trim(v)
-    gsub(/^"+|"+$/, "", v)
-    gsub(/^\047+|\047+$/, "", v)
-    gsub(/^\140+|\140+$/, "", v)
-    return v
-  }
-  function fence_count(s, c, n){ n=0; while (substr(s, n+1, 1) == c) n++; return n }
+  function trim(s){ sub(/^\xef\xbb\xbf/, "", s); gsub(/\r/, "", s); gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+  function strip_quotes(v){ v=trim(v); gsub(/^"+|"+$/, "", v); gsub(/^\047+|\047+$/, "", v); return v }
   function tolower_ascii(s, out, i, c){
-    out=""
-    for(i=1;i<=length(s);i++){
-      c=substr(s,i,1)
-      if(c>="A" && c<="Z") c=tolower(c)
-      out=out c
-    }
+    out=""; for(i=1;i<=length(s);i++){ c=substr(s,i,1); if(c>="A" && c<="Z") c=tolower(c); out=out c }
     return out
   }
-
   BEGIN{
-    IGNORECASE=1
-    in_fm=0; first=0;
-    closed=0; decision=""; sup_by="";
-    in_code=0; fence_ch=""; fence_len=0;
-
-    in_tags_block=0
-    is_minutes=0
-
-    a_txt=""; b_txt=""; f_txt="";
+    IGNORECASE=1; in_fm=0; first=0; closed=0; decision=""; sup_by=""; is_minutes=0; prio_set=0;
   }
-
   {
-    line=$0
-    sub(/\r$/, "", line)
-    if(NR==1){ sub(/^\xef\xbb\xbf/, "", line) }
-    t=trim(line)
-
+    line=$0; sub(/\r$/, "", line); t=trim(line);
+    if(NR==1) sub(/^\xef\xbb\xbf/, "", t)
+    
     if(!first){
       if(t=="") next
       first=1
       if(t ~ /^---[ \t]*$/){ in_fm=1; next }
     }
-
     if(in_fm){
       if(t ~ /^---[ \t]*$/){ in_fm=0; next }
-
       if(t ~ /^closed:[ \t]*/){ closed=1 }
-
-      if(t ~ /^decision:[ \t]*/){
-        sub(/^decision:[ \t]*/, "", t)
-        decision=tolower_ascii(trim(t))
-      }
-
-      if(t ~ /^superseded_by:[ \t]*/){
-        sub(/^superseded_by:[ \t]*/, "", t)
-        sup_by=strip_quotes(t)
-      }
-
-      if(t ~ /^tags:[ \t]*\[/){
-        v=t
-        sub(/^tags:[ \t]*\[/, "", v)
-        sub(/\][ \t]*$/, "", v)
-        n=split(v, arr, ",")
-        for(i=1;i<=n;i++){
-          tag=strip_quotes(arr[i])
-          tag=tolower_ascii(trim(tag))
-          if(tag=="minutes"){ is_minutes=1 }
-        }
-        in_tags_block=0
-      } else if(t ~ /^tags:[ \t]*$/){
-        in_tags_block=1
-      } else if(t ~ /^tags:[ \t]*/){
-        v=t
-        sub(/^tags:[ \t]*/, "", v)
-        tag=tolower_ascii(strip_quotes(v))
-        if(tag=="minutes"){ is_minutes=1 }
-        in_tags_block=0
-      } else if(in_tags_block==1){
-        if(t ~ /^-[ \t]*/){
-          v=t
-          sub(/^-+[ \t]*/, "", v)
-          tag=tolower_ascii(strip_quotes(v))
-          if(tag=="minutes"){ is_minutes=1 }
-        } else if(t ~ /^[A-Za-z0-9_.-]+:[ \t]*/){
-          in_tags_block=0
-        }
-      }
-
+      if(t ~ /^decision:[ \t]*/){ sub(/^decision:[ \t]*/, "", t); decision=tolower_ascii(trim(t)) }
+      if(t ~ /^superseded_by:[ \t]*/){ sub(/^superseded_by:[ \t]*/, "", t); sup_by=strip_quotes(t) }
+      if(t ~ /minutes/){ is_minutes=1 } # 簡易判定(tagsの中身まで厳密に見なくても一旦OKとする)
       next
     }
-
-    u=trim(line)
-    if(in_code){
-      c=substr(u,1,1)
-      if(c==fence_ch){
-        n=fence_count(u, fence_ch)
-        if(n>=fence_len){
-          rest=trim(substr(u,n+1))
-          if(rest==""){ in_code=0; next }
-        }
-      }
-      next
-    } else {
-      c=substr(u,1,1)
-      if(c=="`" || c=="~"){
-        n=fence_count(u,c)
-        if(n>=3){ fence_ch=c; fence_len=n; in_code=1; next }
-      }
-    }
-
     low=tolower(line)
-
     if(prio_set==0){
-      pa=index(low,"@awaiting")
-      pb=index(low,"@blocked")
-      pf=index(low,"@focus")
-
-      best=0
-      tag=""
-      if(pa>0 && (best==0 || pa<best)){ best=pa; tag="awaiting" }
-      if(pb>0 && (best==0 || pb<best)){ best=pb; tag="blocked" }
-      if(pf>0 && (best==0 || pf<best)){ best=pf; tag="focus" }
-
-      if(best>0){
-        tmp=line
-        if(tag=="awaiting"){
-          prio_icon="⏳"
-          sub(/.*@awaiting[[:space:]]*/, "", tmp)
-        } else if(tag=="blocked"){
-          prio_icon="🧱"
-          sub(/.*@blocked[[:space:]]*/, "", tmp)
-        } else if(tag=="focus"){
-          prio_icon="🎯"
-          sub(/.*@focus[[:space:]]*/, "", tmp)
-        }
-        prio_text=trim(tmp)
-        prio_set=1
-      }
+      if(index(low,"@awaiting")){ prio_icon="⏳"; sub(/.*@awaiting[[:space:]]*/, "", line); prio_text=trim(line); prio_set=1 }
+      else if(index(low,"@blocked")){ prio_icon="🧱"; sub(/.*@blocked[[:space:]]*/, "", line); prio_text=trim(line); prio_set=1 }
+      else if(index(low,"@focus")){ prio_icon="🎯"; sub(/.*@focus[[:space:]]*/, "", line); prio_text=trim(line); prio_set=1 }
     }
-  } # <--- ★FIX: メインループの閉じ括弧が抜けていたのを修正
-
+  }
   END{
-    life = (closed?ic:io)
-    min = (is_minutes?imin:"")
-    kind = (decision!="" ? idec : "")
+    life=(closed?ic:io); min=(is_minutes?imin:""); kind=(decision!=""?idec:"");
+    dec="";
+    if(decision=="accepted") dec=iacc; else if(decision=="rejected") dec=irej;
+    else if(decision=="superseded") dec=isup; else if(decision=="dropped") dec=idrp;
+    else if(decision!="") dec=iprp;
 
-    dec=""
-    if(decision!=""){
-      if(decision=="accepted") dec=iacc
-      else if(decision=="rejected") dec=irej
-      else if(decision=="superseded") dec=isup
-      else if(decision=="dropped") dec=idrp
-      else dec=iprp
+    prio=""; text="";
+    if(!(decision ~ /^(accepted|rejected|superseded|dropped)$/) && prio_set==1){
+       prio=prio_icon; text=prio_text;
     }
+    arrow=""; if(decision=="superseded" && sup_by!=""){ arrow=sup_by; }
 
-    prio=""; text=""
-    if(!(decision ~ /^(accepted|rejected|superseded|dropped)$/)){
-      if(prio_set==1){
-        prio=prio_icon
-        text=prio_text
-      }
-    }
-
-    arrow=""
-    if(decision=="superseded" && sup_by!=""){ arrow=sup_by }
-
-    gsub(/\t/, " ", text)
-    gsub(/\t/, " ", arrow)
-
+    gsub(/\t/, " ", text); gsub(/\t/, " ", arrow);
     printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", life, min, kind, dec, prio, text, arrow
   }' "$f_path"
 }
@@ -564,11 +430,8 @@ scan_meta() {
 ensure_meta() {
   local f_path="$1"
   [[ -f "$f_path" ]] || return 1
-
   local cur
   cur="$("${STAT_CMD[@]}" "$f_path" 2>/dev/null || echo 0)"
-  [[ "$cur" =~ ^[0-9]+$ ]] || cur=0
-
   if [[ "${META_MTIME["$f_path"]:-}" != "$cur" ]]; then
     META_INFO["$f_path"]="$(scan_meta "$f_path")"
     META_MTIME["$f_path"]="$cur"
@@ -612,6 +475,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     inside="${after_open%%]]*}"
     after_close="${after_open#*]]}"
 
+    # ★ Suffix Cleanup: Aggressively consume existing icons/text
     after_close="$(consume_auto_suffix "$after_close")"
 
     link_target="$inside"
@@ -624,10 +488,8 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     target_filepart="${link_target%%#*}"
     target_filepart="$(trim_ws_basic "$target_filepart")"
 
+    # ★ Prefix Cleanup: Iteratively consume existing icons
     if (( first_link_in_line )); then
-      # ★FIX: leading_wsを使うと箇条書きの「- 」や「* 」まで消えてしまうため、
-      # 以前のアイコンだけ消去する安全なclean_prefix_segmentに戻しました。
-      # もしテキストも消したい場合は、リスト記号を保護するロジックが必要です。
       pre_clean="$(clean_prefix_segment "$pre")"
       first_link_in_line=0
     else
@@ -647,7 +509,6 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     fi
 
     resolved_path="$(resolve_file_path_fast "$filename")"
-
     info_line="$(get_link_info_fast "$resolved_path")"
     IFS=$'\t' read -r life_icon minutes_icon kind_icon dec_icon pr_icon extra_txt arrow_txt <<< "$info_line"
     unset IFS
@@ -671,13 +532,6 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   done
 
   out+="$rest"
-  if (( ZK_TRACE )); then
-    if [[ "$line" != "$out" ]]; then
-      trace "LINE changed"
-      trace "  IN : $line"
-      trace "  OUT: $out"
-    fi
-  fi
   printf '%s\n' "$out" >> "$TEMP_FILE"
 done < "$TARGET_FILE"
 
