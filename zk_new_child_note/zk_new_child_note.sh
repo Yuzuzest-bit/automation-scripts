@@ -4,7 +4,6 @@ set -euo pipefail
 # ------------------------------------------------------------
 # zk_new_child_note.sh
 # - 子ノートをテンプレから作成
-# - 親ノート(frontmatter直下)に [[wikilink]] を挿入
 # - 子ノートの [[wikilink]] をクリップボードにコピー
 # - 末尾で子ノートを VS Code で開く
 #
@@ -73,7 +72,6 @@ to_posix() {
 
 clip_set() {
   local s="$1"
-  # Git Bash /dev/clipboard 優先
   if [[ -e /dev/clipboard ]]; then
     printf '%s' "$s" > /dev/clipboard
   elif command -v clip.exe >/dev/null 2>&1; then
@@ -115,60 +113,6 @@ slugify() {
   s="$(printf '%s' "$s" | sed -E 's/[^0-9A-Za-zぁ-んァ-ン一-龠ー_・-]+/_/g; s/_+/_/g; s/^_+|_+$//g')"
   [[ -n "$s" ]] || s="child"
   printf '%s\n' "$s"
-}
-
-insert_link_below_frontmatter() {
-  local parent="$1"
-  local child_base="$2"
-  local link="[[${child_base}]]"
-
-  if grep -Fq "$link" "$parent"; then
-    echo "[INFO] link already exists in parent, skip insert"
-    return 0
-  fi
-
-  local tmp
-  tmp="$(mktemp)"
-
-  awk -v link="$link" '
-    BEGIN { started=0; inFM=0; inserted=0 }
-    {
-      line=$0
-      cleanLine=line
-      sub(/\r$/, "", cleanLine)
-
-      if (started==0) {
-        if (cleanLine ~ /^[[:space:]]*$/) { print line; next }
-        if (cleanLine ~ /^[[:space:]]*---[[:space:]]*$/) {
-          started=1; inFM=1; print line; next
-        }
-        started=2; print line; next
-      }
-      if (started==1 && inFM==1) {
-        print line
-        if (cleanLine ~ /^[[:space:]]*---[[:space:]]*$/) {
-          inFM=0
-          if (!inserted) {
-            print ""
-            print link
-            print ""
-            inserted=1
-          }
-        }
-        next
-      }
-      print line
-    }
-    END {
-      if (started==1 && inserted==0) exit 3
-    }
-  ' "$parent" > "$tmp" || {
-    rc=$?
-    rm -f "$tmp"
-    return "$rc"
-  }
-  mv "$tmp" "$parent"
-  echo "[INFO] inserted below frontmatter: $link"
 }
 
 esc_sed_repl() {
@@ -253,18 +197,12 @@ render_template "$TEMPL_FILE" "$CHILD_PATH"
 echo "[INFO] created    : $CHILD_PATH"
 echo "[INFO] parent id  : $PARENT_ID"
 
-# 5. 親ファイル更新
-insert_link_below_frontmatter "$PARENT_FILE" "$CHILD_BASE" || {
-  echo "[WARN] could not insert below frontmatter; fallback to append end" >&2
-  printf '\n[[%s]]\n' "$CHILD_BASE" >> "$PARENT_FILE"
-}
-
-# 6. Wikilinkをクリップボードへコピー (修正箇所)
+# 5. Wikilinkをクリップボードへコピー
 WIKILINK="[[${CHILD_BASE}]]"
 clip_set "$WIKILINK" || true
 echo "[INFO] Copied to clipboard: $WIKILINK"
 
-# 7. VS Codeで開く
+# 6. VS Codeで開く
 if [[ "$OPEN_CHILD" -eq 1 ]]; then
   if command -v code >/dev/null 2>&1; then
     code -r "$CHILD_PATH" >/dev/null 2>&1 || true
