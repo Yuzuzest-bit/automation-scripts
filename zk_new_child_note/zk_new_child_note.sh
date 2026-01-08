@@ -3,42 +3,49 @@ set -euo pipefail
 
 # ------------------------------------------------------------
 # zk_new_child_note.sh
-# - 子ノートをテンプレから作成 (親と同じフォルダに作成)
+# - 子ノートをテンプレから作成
 # - 親ノート(frontmatter直下)に [[wikilink]] を挿入
 # - 末尾で子ノートを VS Code で開く
+#
+# Options:
+#   --same-dir   : 親ノートと同じディレクトリに作成
+#   --out-dir D  : 指定ディレクトリ（WorkspaceRootからの相対）に作成
+#   --no-open    : 自動で開かない
 # ------------------------------------------------------------
 
 OPEN_CHILD=1  # 1=open / 0=do not open
+SAME_DIR=0
+OUT_DIR_ARG=""
 
 usage() {
   cat >&2 <<'EOF'
 usage:
-  zk_new_child_note.sh [--no-open|--open] <parent-md-file> <child-title> [ROOT_DIR] [TEMPLATE_KEY]
+  zk_new_child_note.sh [options] <parent-md-file> <child-title> [ROOT_DIR] [TEMPLATE_KEY]
 
 options:
-  --no-open   子ノートを作成しても VS Code で開かない
-  --open      明示的に開く（デフォルト）
+  --same-dir     Create child note in the same directory as parent
+  --out-dir DIR  Create child note in DIR (relative to ROOT_DIR)
+  --no-open      Do not open VS Code after creation
+  --open         Open VS Code (default)
 EOF
   exit 2
 }
 
-# env で上書き
-if [[ -n "${ZK_NEW_CHILD_OPEN:-}" ]]; then
-  case "${ZK_NEW_CHILD_OPEN}" in
-    0|false|FALSE|no|NO) OPEN_CHILD=0 ;;
-    1|true|TRUE|yes|YES) OPEN_CHILD=1 ;;
-  esac
-fi
-
+# --- 引数解析ループ ---
 pos=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --no-open) OPEN_CHILD=0 ;;
-    --open)    OPEN_CHILD=1 ;;
+    --no-open)  OPEN_CHILD=0; shift ;;
+    --open)     OPEN_CHILD=1; shift ;;
+    --same-dir) SAME_DIR=1; shift ;;
+    --out-dir)
+      if [[ -z "${2:-}" ]]; then echo "[ERR] --out-dir requires an argument"; exit 2; fi
+      OUT_DIR_ARG="$2"
+      shift 2
+      ;;
     -h|--help) usage ;;
-    *)         pos+=("$1") ;;
+    *)         pos+=("$1"); shift ;;
   esac
-  shift
 done
 
 PARENT_FILE="${pos[0]:-}"
@@ -49,6 +56,8 @@ TEMPLATE_KEY="${pos[3]:-task}"
 if [[ -z "$PARENT_FILE" || -z "$CHILD_TITLE" ]]; then
   usage
 fi
+
+# --- 関数定義 (Git Bash/Windows対応版) ---
 
 to_posix() {
   local p="$1"
@@ -63,7 +72,7 @@ to_posix() {
 
 clip_set() {
   local s="$1"
-  # Git Bash用に /dev/clipboard を優先 (文字化け防止)
+  # Git Bashでは /dev/clipboard 推奨
   if [[ -e /dev/clipboard ]]; then
     printf '%s' "$s" > /dev/clipboard
   elif command -v clip.exe >/dev/null 2>&1; then
@@ -77,7 +86,7 @@ clip_set() {
 
 get_fm_id() {
   local f="$1"
-  # \r 除去を追加
+  # \r (CR) を除去して処理
   tr -d '\r' < "$f" | awk '
   BEGIN{ inFM=0; fmDone=0; nonHead=0 }
   {
@@ -101,7 +110,7 @@ get_fm_id() {
 
 slugify() {
   local s="$1"
-  s="$(printf '%s' "$s" | tr -d '\r')" # Windows改行除去
+  s="$(printf '%s' "$s" | tr -d '\r')"
   s="${s// /_}"
   s="$(printf '%s' "$s" | sed -E 's/[^0-9A-Za-zぁ-んァ-ン一-龠ー_・-]+/_/g; s/_+/_/g; s/^_+|_+$//g')"
   [[ -n "$s" ]] || s="child"
@@ -113,7 +122,6 @@ insert_link_below_frontmatter() {
   local child_base="$2"
   local link="[[${child_base}]]"
 
-  # 親ファイル検索時に \r を考慮してgrep（簡易チェック）
   if grep -Fq "$link" "$parent"; then
     echo "[INFO] link already exists in parent, skip insert"
     return 0
@@ -122,28 +130,20 @@ insert_link_below_frontmatter() {
   local tmp
   tmp="$(mktemp)"
 
-  # awkでの挿入ロジック (\r除去は行わないが、出力時に改行コードを維持するかは環境依存。Git BashならLFになる)
   awk -v link="$link" '
     BEGIN { started=0; inFM=0; inserted=0 }
     {
       line=$0
-      # WindowsのCRを取り除いて判定
       cleanLine=line
-      sub(/\r$/, "", cleanLine)
+      sub(/\r$/, "", cleanLine) # 行末CR除去用
 
       if (started==0) {
         if (cleanLine ~ /^[[:space:]]*$/) { print line; next }
         if (cleanLine ~ /^[[:space:]]*---[[:space:]]*$/) {
-          started=1
-          inFM=1
-          print line
-          next
+          started=1; inFM=1; print line; next
         }
-        started=2
-        print line
-        next
+        started=2; print line; next
       }
-
       if (started==1 && inFM==1) {
         print line
         if (cleanLine ~ /^[[:space:]]*---[[:space:]]*$/) {
@@ -167,7 +167,6 @@ insert_link_below_frontmatter() {
     rm -f "$tmp"
     return "$rc"
   }
-
   mv "$tmp" "$parent"
   echo "[INFO] inserted below frontmatter: $link"
 }
@@ -188,7 +187,6 @@ render_template() {
   CHILD_BASE_ESC="$(esc_sed_repl "$CHILD_BASE")"
   TITLE_ESC="$(esc_sed_repl "$CHILD_TITLE")"
 
-  # テンプレート読み込み時に \r 除去
   tr -d '\r' < "$tmpl_file" | sed \
     -e "s|{{ID}}|${ID_ESC}|g" \
     -e "s|{{PARENT}}|${PARENT_ESC}|g" \
@@ -199,58 +197,70 @@ render_template() {
     > "$out_file"
 }
 
-# --- メイン処理開始 ---
+# --- メイン処理 ---
 
+# 1. パス正規化
 PARENT_FILE="$(to_posix "$PARENT_FILE")"
-[[ -f "$PARENT_FILE" ]] || { echo "[ERR] not found: $PARENT_FILE" >&2; exit 2; }
+if [[ ! -f "$PARENT_FILE" ]]; then
+  echo "[ERR] not found: $PARENT_FILE" >&2; exit 2
+fi
 
-# 【修正点1】作成先のディレクトリを「親ファイルと同じ場所」にする
-OUTPUT_DIR="$(dirname "$PARENT_FILE")"
-
-# テンプレートなどを探すためのROOTは引数または親ディレクトリから決定
+# ROOT設定 (引数指定がなければ親ファイルのディレクトリを仮ルートとする)
 if [[ -z "$ROOT" ]]; then
-  ROOT="$OUTPUT_DIR"
+  ROOT="$(cd "$(dirname "$PARENT_FILE")" && pwd)"
 else
   ROOT="$(to_posix "$ROOT")"
 fi
 
-# ID取得
+# 2. 出力ディレクトリ(OUTPUT_DIR)の決定
+if [[ -n "$OUT_DIR_ARG" ]]; then
+  # --out-dir 指定あり: ROOTからの相対パスとして解決
+  OUTPUT_DIR="${ROOT}/${OUT_DIR_ARG}"
+elif [[ "$SAME_DIR" -eq 1 ]]; then
+  # --same-dir 指定あり: 親ファイルと同じ
+  OUTPUT_DIR="$(dirname "$PARENT_FILE")"
+else
+  # 指定なし: ROOT直下 (または好みのデフォルトフォルダ)
+  OUTPUT_DIR="${ROOT}"
+fi
+
+# ディレクトリがなければ作成
+mkdir -p "$OUTPUT_DIR"
+
+# 3. ID取得 & 変数生成
 PARENT_ID="$(get_fm_id "$PARENT_FILE")"
 if [[ -z "$PARENT_ID" ]]; then
-  echo "[ERR] parent has no id: $PARENT_FILE" >&2
-  exit 1
+  echo "[ERR] parent has no id: $PARENT_FILE" >&2; exit 1
 fi
 
 TODAY_YMD="$(date '+%Y-%m-%d')"
 NOW="$(date '+%Y-%m-%d %H:%M')"
-
 BASE="$(slugify "$CHILD_TITLE")"
 CHILD_BASE="${TODAY_YMD}_${BASE}"
-
-# 【修正点2】ファイルパスの構築に OUTPUT_DIR を使用
 CHILD_PATH="${OUTPUT_DIR}/${CHILD_BASE}.md"
 CHILD_ID="$(date '+%Y%m%d')-${CHILD_BASE}"
 
 if [[ -e "$CHILD_PATH" ]]; then
-  echo "[ERR] already exists: $CHILD_PATH" >&2
-  exit 1
+  echo "[ERR] already exists: $CHILD_PATH" >&2; exit 1
 fi
 
+# 4. テンプレート処理
 TEMPL_DIR="${ROOT}/templates"
 TEMPL_FILE="${TEMPL_DIR}/child_${TEMPLATE_KEY}.md"
 
 if [[ ! -f "$TEMPL_FILE" ]]; then
   echo "[ERR] template not found: $TEMPL_FILE" >&2
-  echo "[HINT] expected at: ${TEMPL_FILE}" >&2
+  echo "[HINT] check: ${TEMPL_FILE}" >&2
   exit 1
 fi
 
 render_template "$TEMPL_FILE" "$CHILD_PATH"
 
-echo "[INFO] created: $CHILD_PATH"
-echo "[INFO] parent id : $PARENT_ID"
-echo "[INFO] template  : ${TEMPLATE_KEY}"
+echo "[INFO] created    : $CHILD_PATH"
+echo "[INFO] parent id  : $PARENT_ID"
+echo "[INFO] template   : ${TEMPLATE_KEY}"
 
+# 5. 親ファイル更新
 insert_link_below_frontmatter "$PARENT_FILE" "$CHILD_BASE" || {
   echo "[WARN] could not insert below frontmatter; fallback to append end" >&2
   printf '\n[[%s]]\n' "$CHILD_BASE" >> "$PARENT_FILE"
@@ -258,10 +268,9 @@ insert_link_below_frontmatter "$PARENT_FILE" "$CHILD_BASE" || {
 
 clip_set "$PARENT_ID" || true
 
+# 6. VS Codeで開く
 if [[ "$OPEN_CHILD" -eq 1 ]]; then
   if command -v code >/dev/null 2>&1; then
-    # code コマンドにも Windows パスではなく Git Bash パスを渡しても通常は処理してくれるが
-    # 心配な場合は cygpath -w "$CHILD_PATH" する手もある
     code -r "$CHILD_PATH" >/dev/null 2>&1 || true
   fi
 else
