@@ -5,6 +5,7 @@ set -euo pipefail
 # zk_new_child_note.sh
 # - 子ノートをテンプレから作成
 # - 親ノート(frontmatter直下)に [[wikilink]] を挿入
+# - 子ノートの [[wikilink]] をクリップボードにコピー
 # - 末尾で子ノートを VS Code で開く
 #
 # Options:
@@ -57,7 +58,7 @@ if [[ -z "$PARENT_FILE" || -z "$CHILD_TITLE" ]]; then
   usage
 fi
 
-# --- 関数定義 (Git Bash/Windows対応版) ---
+# --- 関数定義 ---
 
 to_posix() {
   local p="$1"
@@ -72,7 +73,7 @@ to_posix() {
 
 clip_set() {
   local s="$1"
-  # Git Bashでは /dev/clipboard 推奨
+  # Git Bash /dev/clipboard 優先
   if [[ -e /dev/clipboard ]]; then
     printf '%s' "$s" > /dev/clipboard
   elif command -v clip.exe >/dev/null 2>&1; then
@@ -86,7 +87,6 @@ clip_set() {
 
 get_fm_id() {
   local f="$1"
-  # \r (CR) を除去して処理
   tr -d '\r' < "$f" | awk '
   BEGIN{ inFM=0; fmDone=0; nonHead=0 }
   {
@@ -135,7 +135,7 @@ insert_link_below_frontmatter() {
     {
       line=$0
       cleanLine=line
-      sub(/\r$/, "", cleanLine) # 行末CR除去用
+      sub(/\r$/, "", cleanLine)
 
       if (started==0) {
         if (cleanLine ~ /^[[:space:]]*$/) { print line; next }
@@ -205,7 +205,7 @@ if [[ ! -f "$PARENT_FILE" ]]; then
   echo "[ERR] not found: $PARENT_FILE" >&2; exit 2
 fi
 
-# ROOT設定 (引数指定がなければ親ファイルのディレクトリを仮ルートとする)
+# ROOT設定
 if [[ -z "$ROOT" ]]; then
   ROOT="$(cd "$(dirname "$PARENT_FILE")" && pwd)"
 else
@@ -214,17 +214,12 @@ fi
 
 # 2. 出力ディレクトリ(OUTPUT_DIR)の決定
 if [[ -n "$OUT_DIR_ARG" ]]; then
-  # --out-dir 指定あり: ROOTからの相対パスとして解決
   OUTPUT_DIR="${ROOT}/${OUT_DIR_ARG}"
 elif [[ "$SAME_DIR" -eq 1 ]]; then
-  # --same-dir 指定あり: 親ファイルと同じ
   OUTPUT_DIR="$(dirname "$PARENT_FILE")"
 else
-  # 指定なし: ROOT直下 (または好みのデフォルトフォルダ)
   OUTPUT_DIR="${ROOT}"
 fi
-
-# ディレクトリがなければ作成
 mkdir -p "$OUTPUT_DIR"
 
 # 3. ID取得 & 変数生成
@@ -250,7 +245,6 @@ TEMPL_FILE="${TEMPL_DIR}/child_${TEMPLATE_KEY}.md"
 
 if [[ ! -f "$TEMPL_FILE" ]]; then
   echo "[ERR] template not found: $TEMPL_FILE" >&2
-  echo "[HINT] check: ${TEMPL_FILE}" >&2
   exit 1
 fi
 
@@ -258,7 +252,6 @@ render_template "$TEMPL_FILE" "$CHILD_PATH"
 
 echo "[INFO] created    : $CHILD_PATH"
 echo "[INFO] parent id  : $PARENT_ID"
-echo "[INFO] template   : ${TEMPLATE_KEY}"
 
 # 5. 親ファイル更新
 insert_link_below_frontmatter "$PARENT_FILE" "$CHILD_BASE" || {
@@ -266,9 +259,12 @@ insert_link_below_frontmatter "$PARENT_FILE" "$CHILD_BASE" || {
   printf '\n[[%s]]\n' "$CHILD_BASE" >> "$PARENT_FILE"
 }
 
-clip_set "$PARENT_ID" || true
+# 6. Wikilinkをクリップボードへコピー (修正箇所)
+WIKILINK="[[${CHILD_BASE}]]"
+clip_set "$WIKILINK" || true
+echo "[INFO] Copied to clipboard: $WIKILINK"
 
-# 6. VS Codeで開く
+# 7. VS Codeで開く
 if [[ "$OPEN_CHILD" -eq 1 ]]; then
   if command -v code >/dev/null 2>&1; then
     code -r "$CHILD_PATH" >/dev/null 2>&1 || true
