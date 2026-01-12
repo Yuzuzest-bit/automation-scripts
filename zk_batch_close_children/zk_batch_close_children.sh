@@ -2,19 +2,29 @@
 set -uo pipefail
 
 # ------------------------------------------------------------
-# zk_batch_update_parent_v2.sh (win-optimized)
+# zk_batch_close_children.sh (v3-win)
 # Windows Git Bash 対応版
 # ------------------------------------------------------------
 
 INPUT_FILE="${1:-}"
 
+# --- ヘルプ / 引数チェック ---
 if [[ -z "$INPUT_FILE" ]]; then
-  echo "Usage: $(basename "$0") <parent_note_file>"
+  echo "Usage: $(basename "$0") <dashboard_file>"
   exit 1
 fi
 
 if [[ ! -f "$INPUT_FILE" ]]; then
   echo "[ERR] File not found: $INPUT_FILE"
+  exit 1
+fi
+
+# --- 依存スクリプト (close_task_safe.sh) の場所特定 ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLOSE_SCRIPT="${SCRIPT_DIR}/close_task_safe.sh"
+
+if [[ ! -f "$CLOSE_SCRIPT" ]]; then
+  echo "[ERR] 'close_task_safe.sh' not found in $SCRIPT_DIR"
   exit 1
 fi
 
@@ -25,31 +35,20 @@ PARENT_DIR="$(cd "$(dirname "$INPUT_FILE")" && pwd)"
 PARENT_FILENAME="$(basename "$INPUT_FILE")"
 PARENT_FILE_FULL="${PARENT_DIR}/${PARENT_FILENAME}"
 
-if command -v git >/dev/null 2>&1 && git -C "$PARENT_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
-  WORKSPACE_ROOT="$(git -C "$PARENT_DIR" rev-parse --show-toplevel)"
-else
-  WORKSPACE_ROOT="$PARENT_DIR"
+# --- ワークスペースルートの特定 ---
+if [ -z "${WORKSPACE_ROOT:-}" ]; then
+  if command -v git >/dev/null 2>&1 && git -C "$PARENT_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
+    # Git Bashではパスが /c/Users/... となるが問題なし
+    WORKSPACE_ROOT="$(git -C "$PARENT_DIR" rev-parse --show-toplevel)"
+  else
+    WORKSPACE_ROOT="$PARENT_DIR"
+  fi
 fi
 
-# ============================================================
-# 1. 親ノート(このファイル)のIDを取得する
-# ============================================================
-# 【重要】tr -d '\r' でCRを除去しないと、sedでの置換時にファイルが破損する原因になる
-NEW_PARENT_ID=$(grep "^id:" "$PARENT_FILE_FULL" | head -n 1 | sed 's/^id:[[:space:]]*//' | tr -d '\r')
+# --- ターゲット抽出ロジック ---
+echo "[INFO] Scanning $PARENT_FILENAME..."
 
-if [[ -z "$NEW_PARENT_ID" ]]; then
-  echo "[ERR] Could not find 'id:' field in $PARENT_FILENAME."
-  exit 1
-fi
-
-echo "[INFO] Processing: $PARENT_FILE_FULL"
-echo "[INFO] New Parent ID: $NEW_PARENT_ID"
-
-# ============================================================
-# 2. リンク抽出とファイル探索
-# ============================================================
-
-# 【重要】ここでも \r を除去
+# 【重要】Windowsの改行コード(\r)を除去してから処理する
 LINKS_RAW=$(grep -oE '\[\[[^]|]+(\|[^]]+)?\]\]' "$PARENT_FILE_FULL" | tr -d '\r' || true)
 
 if [[ -z "$LINKS_RAW" ]]; then
@@ -61,14 +60,16 @@ SORTED_LINKS=$(echo "$LINKS_RAW" | sort -u)
 
 IFS=$'\n'
 for RAW_LINK in $SORTED_LINKS; do
+  # [[Link|Alias]] -> Link に整形
   LINK_NAME=$(echo "$RAW_LINK" | sed -E 's/^\[\[//; s/\]\]$//; s/\|.*//')
 
+  # ファイル名自身の場合はスキップ
   PARENT_NAME_NO_EXT="${PARENT_FILENAME%.*}"
   if [[ "$LINK_NAME" == "$PARENT_NAME_NO_EXT" ]]; then
     continue
   fi
 
-  # --- ファイル探索 ---
+  # --- ファイル探索ロジック ---
   TARGET_FILE=""
 
   if [[ -f "${PARENT_DIR}/${LINK_NAME}.md" ]]; then
@@ -80,33 +81,23 @@ for RAW_LINK in $SORTED_LINKS; do
     fi
   fi
 
-  # --- 更新実行 ---
+  # --- 実行 ---
   if [[ -z "$TARGET_FILE" ]]; then
     echo "[SKIP] Not found in workspace: ${LINK_NAME}.md"
     continue
   fi
 
-  # ============================================================
-  # 3. parentフィールドの書き換え
-  # ============================================================
   echo "-------------------------------------------------------"
-  echo "[PROC] Updating: ${LINK_NAME}"
-
-  if grep -q "^parent:" "$TARGET_FILE"; then
-    # Git Bash (MSYS/MINGW) は GNU sed ベースなので Linux と同じ構文でOK
-    # ただし uname が "MINGW64..." 等になるため、Darwin 分岐には入らない
-    if [[ "$(uname)" == "Darwin" ]]; then
-      sed -i '' "s/^parent: .*/parent: ${NEW_PARENT_ID}/" "$TARGET_FILE"
-    else
-      # Windows (Git Bash) / Linux
-      sed -i "s/^parent: .*/parent: ${NEW_PARENT_ID}/" "$TARGET_FILE"
-    fi
-    echo "[SUCCESS] Updated parent to: $NEW_PARENT_ID"
+  echo "[PROC] Closing: ${LINK_NAME}"
+  
+  # bash を明示的に呼ぶことで実行権限問題を回避
+  if bash "$CLOSE_SCRIPT" "$TARGET_FILE"; then
+    echo "[SUCCESS] Closed: ${LINK_NAME}"
   else
-    echo "[WARN] No 'parent:' field found. Skipping."
+    echo "[FAIL] Could not close: ${LINK_NAME}"
   fi
 
 done
 
 echo "-------------------------------------------------------"
-echo "[DONE] Batch update finished."
+echo "[DONE] Batch close operation finished."
