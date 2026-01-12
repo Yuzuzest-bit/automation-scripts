@@ -1,0 +1,15 @@
+    {
+      "label": "bat update parent",
+      "type": "process",
+      "command": "C:\\Program Files\\Git\\bin\\bash.exe",
+      "args": [
+        "${workspaceFolder}/zk_batch_update_parent_v2.sh",
+        "${file}"
+      ],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
