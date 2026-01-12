@@ -2,16 +2,26 @@
 set -uo pipefail
 
 # ------------------------------------------------------------
-# zk_batch_close_children.sh (v3-win-debug)
-# Windows Git Bash 対応 + 検索ロジック強化版
+# zk_batch_close_children.sh (v5-root-fix)
+# Windows共有フォルダ等でGit判定が失敗する場合に対応した
+# 「フォルダ遡り」によるルート検出版
 # ------------------------------------------------------------
 
-INPUT_FILE="${1:-}"
+RAW_INPUT="${1:-}"
 
-# --- ヘルプ / 引数チェック ---
-if [[ -z "$INPUT_FILE" ]]; then
+# --- 引数チェック ---
+if [[ -z "$RAW_INPUT" ]]; then
   echo "Usage: $(basename "$0") <dashboard_file>"
   exit 1
+fi
+
+# ============================================================
+# 1. パス変換 (Windows -> Unix)
+# ============================================================
+if command -v cygpath >/dev/null 2>&1; then
+  INPUT_FILE="$(cygpath -u "$RAW_INPUT")"
+else
+  INPUT_FILE="$RAW_INPUT"
 fi
 
 if [[ ! -f "$INPUT_FILE" ]]; then
@@ -19,7 +29,7 @@ if [[ ! -f "$INPUT_FILE" ]]; then
   exit 1
 fi
 
-# --- 依存スクリプト (close_task_safe.sh) の場所特定 ---
+# 依存スクリプト確認
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLOSE_SCRIPT="${SCRIPT_DIR}/close_task_safe.sh"
 
@@ -29,29 +39,45 @@ if [[ ! -f "$CLOSE_SCRIPT" ]]; then
 fi
 
 # ============================================================
-# 0. パス設定
+# 2. 強力なルートフォルダ検出ロジック
 # ============================================================
 PARENT_DIR="$(cd "$(dirname "$INPUT_FILE")" && pwd)"
 PARENT_FILENAME="$(basename "$INPUT_FILE")"
 PARENT_FILE_FULL="${PARENT_DIR}/${PARENT_FILENAME}"
 
-# ワークスペースルートの特定（ここでも改行コードを除去）
-if [ -z "${WORKSPACE_ROOT:-}" ]; then
-  if command -v git >/dev/null 2>&1 && git -C "$PARENT_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
-    WORKSPACE_ROOT="$(git -C "$PARENT_DIR" rev-parse --show-toplevel | tr -d '\r')"
-  else
-    WORKSPACE_ROOT="$PARENT_DIR"
-  fi
-fi
+# 関数: .git または .obsidian がある場所まで親を遡る
+find_project_root() {
+  local dir="$1"
+  local root="/"
 
-echo "[INFO] Scanning $PARENT_FILENAME..."
+  # Git Bash等のルートに到達するまでループ
+  while [[ "$dir" != "$root" && "$dir" != "." && "$dir" != "/" ]]; do
+    # .git または .obsidian があればそこをルートとみなす
+    if [[ -d "$dir/.git" || -d "$dir/.obsidian" ]]; then
+      echo "$dir"
+      return
+    fi
+    # 親ディレクトリへ
+    dir="$(dirname "$dir")"
+  done
+
+  # 見つからなかった場合は、元の親ディレクトリを返す
+  echo "$1"
+}
+
+# ルート検出実行
+WORKSPACE_ROOT=$(find_project_root "$PARENT_DIR")
+
+echo "[DEBUG] Input(Win): $RAW_INPUT"
+echo "[DEBUG] Input(Unix): $INPUT_FILE"
 echo "[INFO] Workspace Root: $WORKSPACE_ROOT"
+echo "[INFO] Scanning $PARENT_FILENAME..."
 
 # ============================================================
-# 1. リンク抽出とファイル探索
+# 3. リンク抽出とファイル探索
 # ============================================================
 
-# 改行コード(\r)を除去してリンク抽出
+# 改行コード除去
 LINKS_RAW=$(grep -oE '\[\[[^]|]+(\|[^]]+)?\]\]' "$PARENT_FILE_FULL" | tr -d '\r' || true)
 
 if [[ -z "$LINKS_RAW" ]]; then
@@ -63,30 +89,24 @@ SORTED_LINKS=$(echo "$LINKS_RAW" | sort -u)
 
 IFS=$'\n'
 for RAW_LINK in $SORTED_LINKS; do
-  # [[Link|Alias]] -> Link に整形
   LINK_NAME=$(echo "$RAW_LINK" | sed -E 's/^\[\[//; s/\]\]$//; s/\|.*//')
 
-  # ファイル名自身の場合はスキップ
   PARENT_NAME_NO_EXT="${PARENT_FILENAME%.*}"
   if [[ "$LINK_NAME" == "$PARENT_NAME_NO_EXT" ]]; then
     continue
   fi
 
-  # --- ファイル探索ロジック (強化版) ---
+  # --- ファイル探索ロジック ---
   TARGET_FILE=""
 
-  # 1. 親ファイルと同じディレクトリにあるか？
+  # 1. 同じフォルダにあるか？
   if [[ -f "${PARENT_DIR}/${LINK_NAME}.md" ]]; then
     TARGET_FILE="${PARENT_DIR}/${LINK_NAME}.md"
 
-  # 2. ワークスペース全体から探す
+  # 2. ワークスペース全体から探す (ルートから -iname で検索)
   else
-    # [DEBUG] どこを探しているか表示（不要ならコメントアウトしてください）
-    # echo "[DEBUG] Searching for '${LINK_NAME}.md' in '$WORKSPACE_ROOT'..."
-
-    # 修正点: -name ではなく -iname を使用（大文字小文字を無視）
+    # 検索範囲が正しくなったので見つかるはず
     FOUND_PATH=$(find "$WORKSPACE_ROOT" -iname "${LINK_NAME}.md" -print -quit 2>/dev/null)
-    
     if [[ -n "$FOUND_PATH" ]]; then
       TARGET_FILE="$FOUND_PATH"
     fi
@@ -94,14 +114,12 @@ for RAW_LINK in $SORTED_LINKS; do
 
   # --- 実行 ---
   if [[ -z "$TARGET_FILE" ]]; then
-    # 見つからない場合、何を探してダメだったか詳細を出す
-    echo "[SKIP] Not found: ${LINK_NAME}.md"
+    echo "[SKIP] Not found in workspace: ${LINK_NAME}.md"
     continue
   fi
 
   echo "-------------------------------------------------------"
   echo "[PROC] Closing: ${LINK_NAME}"
-  # echo "[DEBUG] Path: $TARGET_FILE"
 
   if bash "$CLOSE_SCRIPT" "$TARGET_FILE"; then
     echo "[SUCCESS] Closed: ${LINK_NAME}"
