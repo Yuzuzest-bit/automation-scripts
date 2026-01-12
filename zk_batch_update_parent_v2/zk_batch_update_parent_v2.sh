@@ -2,15 +2,26 @@
 set -uo pipefail
 
 # ------------------------------------------------------------
-# zk_batch_update_parent_v2.sh (win-optimized)
-# Windows Git Bash 対応版
+# zk_batch_update_parent_v2.sh (v3-win-fix)
+# Windows Git Bash 対応版 (パス変換・ルート自動検出・iname検索)
 # ------------------------------------------------------------
 
-INPUT_FILE="${1:-}"
+RAW_INPUT="${1:-}"
 
-if [[ -z "$INPUT_FILE" ]]; then
+# --- ヘルプ / 引数チェック ---
+if [[ -z "$RAW_INPUT" ]]; then
   echo "Usage: $(basename "$0") <parent_note_file>"
   exit 1
+fi
+
+# ============================================================
+# 1. パス変換 (Windows -> Unix)
+# VS Codeから渡される "C:\Users\..." を "/c/Users/..." に変換
+# ============================================================
+if command -v cygpath >/dev/null 2>&1; then
+  INPUT_FILE="$(cygpath -u "$RAW_INPUT")"
+else
+  INPUT_FILE="$RAW_INPUT"
 fi
 
 if [[ ! -f "$INPUT_FILE" ]]; then
@@ -19,22 +30,37 @@ if [[ ! -f "$INPUT_FILE" ]]; then
 fi
 
 # ============================================================
-# 0. パスの絶対パス化と位置特定
+# 2. 強力なルートフォルダ検出ロジック
+# Gitコマンドが失敗する場合に備え、.git/.obsidianを探して遡る
 # ============================================================
 PARENT_DIR="$(cd "$(dirname "$INPUT_FILE")" && pwd)"
 PARENT_FILENAME="$(basename "$INPUT_FILE")"
 PARENT_FILE_FULL="${PARENT_DIR}/${PARENT_FILENAME}"
 
-if command -v git >/dev/null 2>&1 && git -C "$PARENT_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
-  WORKSPACE_ROOT="$(git -C "$PARENT_DIR" rev-parse --show-toplevel)"
-else
-  WORKSPACE_ROOT="$PARENT_DIR"
-fi
+# 関数: .git または .obsidian がある場所まで親を遡る
+find_project_root() {
+  local dir="$1"
+  local root="/"
+  
+  # ルートに到達するまでループ
+  while [[ "$dir" != "$root" && "$dir" != "." && "$dir" != "/" ]]; do
+    if [[ -d "$dir/.git" || -d "$dir/.obsidian" ]]; then
+      echo "$dir"
+      return
+    fi
+    dir="$(dirname "$dir")"
+  done
+  
+  # 見つからなかった場合は元の親ディレクトリを返す
+  echo "$1"
+}
+
+WORKSPACE_ROOT=$(find_project_root "$PARENT_DIR")
 
 # ============================================================
-# 1. 親ノート(このファイル)のIDを取得する
+# 3. 親ノート(このファイル)のIDを取得する
 # ============================================================
-# 【重要】tr -d '\r' でCRを除去しないと、sedでの置換時にファイルが破損する原因になる
+# 【重要】tr -d '\r' でCRを除去しないと、sedでの置換時にファイルが破損する
 NEW_PARENT_ID=$(grep "^id:" "$PARENT_FILE_FULL" | head -n 1 | sed 's/^id:[[:space:]]*//' | tr -d '\r')
 
 if [[ -z "$NEW_PARENT_ID" ]]; then
@@ -43,13 +69,13 @@ if [[ -z "$NEW_PARENT_ID" ]]; then
 fi
 
 echo "[INFO] Processing: $PARENT_FILE_FULL"
+echo "[INFO] Workspace Root: $WORKSPACE_ROOT"
 echo "[INFO] New Parent ID: $NEW_PARENT_ID"
 
 # ============================================================
-# 2. リンク抽出とファイル探索
+# 4. リンク抽出とファイル探索
 # ============================================================
 
-# 【重要】ここでも \r を除去
 LINKS_RAW=$(grep -oE '\[\[[^]|]+(\|[^]]+)?\]\]' "$PARENT_FILE_FULL" | tr -d '\r' || true)
 
 if [[ -z "$LINKS_RAW" ]]; then
@@ -68,13 +94,16 @@ for RAW_LINK in $SORTED_LINKS; do
     continue
   fi
 
-  # --- ファイル探索 ---
+  # --- ファイル探索 (修正版) ---
   TARGET_FILE=""
 
+  # 1. 親ファイルと同じディレクトリ
   if [[ -f "${PARENT_DIR}/${LINK_NAME}.md" ]]; then
     TARGET_FILE="${PARENT_DIR}/${LINK_NAME}.md"
   else
-    FOUND_PATH=$(find "$WORKSPACE_ROOT" -name "${LINK_NAME}.md" -print -quit 2>/dev/null)
+    # 2. ワークスペース全体 (ルートから -iname で検索)
+    #    Git Bashのfindは大文字小文字を区別するため -iname を使用
+    FOUND_PATH=$(find "$WORKSPACE_ROOT" -iname "${LINK_NAME}.md" -print -quit 2>/dev/null)
     if [[ -n "$FOUND_PATH" ]]; then
       TARGET_FILE="$FOUND_PATH"
     fi
@@ -87,15 +116,14 @@ for RAW_LINK in $SORTED_LINKS; do
   fi
 
   # ============================================================
-  # 3. parentフィールドの書き換え
+  # 5. parentフィールドの書き換え
   # ============================================================
   echo "-------------------------------------------------------"
   echo "[PROC] Updating: ${LINK_NAME}"
 
   if grep -q "^parent:" "$TARGET_FILE"; then
-    # Git Bash (MSYS/MINGW) は GNU sed ベースなので Linux と同じ構文でOK
-    # ただし uname が "MINGW64..." 等になるため、Darwin 分岐には入らない
     if [[ "$(uname)" == "Darwin" ]]; then
+      # Mac
       sed -i '' "s/^parent: .*/parent: ${NEW_PARENT_ID}/" "$TARGET_FILE"
     else
       # Windows (Git Bash) / Linux
