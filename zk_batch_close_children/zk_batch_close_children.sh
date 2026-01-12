@@ -2,8 +2,8 @@
 set -uo pipefail
 
 # ------------------------------------------------------------
-# zk_batch_close_children.sh (v3-win)
-# Windows Git Bash 対応版
+# zk_batch_close_children.sh (v3-win-debug)
+# Windows Git Bash 対応 + 検索ロジック強化版
 # ------------------------------------------------------------
 
 INPUT_FILE="${1:-}"
@@ -29,26 +29,29 @@ if [[ ! -f "$CLOSE_SCRIPT" ]]; then
 fi
 
 # ============================================================
-# 0. パスの絶対パス化と位置特定
+# 0. パス設定
 # ============================================================
 PARENT_DIR="$(cd "$(dirname "$INPUT_FILE")" && pwd)"
 PARENT_FILENAME="$(basename "$INPUT_FILE")"
 PARENT_FILE_FULL="${PARENT_DIR}/${PARENT_FILENAME}"
 
-# --- ワークスペースルートの特定 ---
+# ワークスペースルートの特定（ここでも改行コードを除去）
 if [ -z "${WORKSPACE_ROOT:-}" ]; then
   if command -v git >/dev/null 2>&1 && git -C "$PARENT_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
-    # Git Bashではパスが /c/Users/... となるが問題なし
-    WORKSPACE_ROOT="$(git -C "$PARENT_DIR" rev-parse --show-toplevel)"
+    WORKSPACE_ROOT="$(git -C "$PARENT_DIR" rev-parse --show-toplevel | tr -d '\r')"
   else
     WORKSPACE_ROOT="$PARENT_DIR"
   fi
 fi
 
-# --- ターゲット抽出ロジック ---
 echo "[INFO] Scanning $PARENT_FILENAME..."
+echo "[INFO] Workspace Root: $WORKSPACE_ROOT"
 
-# 【重要】Windowsの改行コード(\r)を除去してから処理する
+# ============================================================
+# 1. リンク抽出とファイル探索
+# ============================================================
+
+# 改行コード(\r)を除去してリンク抽出
 LINKS_RAW=$(grep -oE '\[\[[^]|]+(\|[^]]+)?\]\]' "$PARENT_FILE_FULL" | tr -d '\r' || true)
 
 if [[ -z "$LINKS_RAW" ]]; then
@@ -69,13 +72,21 @@ for RAW_LINK in $SORTED_LINKS; do
     continue
   fi
 
-  # --- ファイル探索ロジック ---
+  # --- ファイル探索ロジック (強化版) ---
   TARGET_FILE=""
 
+  # 1. 親ファイルと同じディレクトリにあるか？
   if [[ -f "${PARENT_DIR}/${LINK_NAME}.md" ]]; then
     TARGET_FILE="${PARENT_DIR}/${LINK_NAME}.md"
+
+  # 2. ワークスペース全体から探す
   else
-    FOUND_PATH=$(find "$WORKSPACE_ROOT" -name "${LINK_NAME}.md" -print -quit 2>/dev/null)
+    # [DEBUG] どこを探しているか表示（不要ならコメントアウトしてください）
+    # echo "[DEBUG] Searching for '${LINK_NAME}.md' in '$WORKSPACE_ROOT'..."
+
+    # 修正点: -name ではなく -iname を使用（大文字小文字を無視）
+    FOUND_PATH=$(find "$WORKSPACE_ROOT" -iname "${LINK_NAME}.md" -print -quit 2>/dev/null)
+    
     if [[ -n "$FOUND_PATH" ]]; then
       TARGET_FILE="$FOUND_PATH"
     fi
@@ -83,14 +94,15 @@ for RAW_LINK in $SORTED_LINKS; do
 
   # --- 実行 ---
   if [[ -z "$TARGET_FILE" ]]; then
-    echo "[SKIP] Not found in workspace: ${LINK_NAME}.md"
+    # 見つからない場合、何を探してダメだったか詳細を出す
+    echo "[SKIP] Not found: ${LINK_NAME}.md"
     continue
   fi
 
   echo "-------------------------------------------------------"
   echo "[PROC] Closing: ${LINK_NAME}"
-  
-  # bash を明示的に呼ぶことで実行権限問題を回避
+  # echo "[DEBUG] Path: $TARGET_FILE"
+
   if bash "$CLOSE_SCRIPT" "$TARGET_FILE"; then
     echo "[SUCCESS] Closed: ${LINK_NAME}"
   else
