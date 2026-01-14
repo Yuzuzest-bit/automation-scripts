@@ -10,6 +10,10 @@
 #   - ダッシュボード出力には "@focus" や "@awaiting" の文字列は出さず、絵文字だけ出す
 #
 # それ以外の仕様は元のまま（BrainDump / gate / due_source / due_weight / 週バケツ等）
+#
+# ★修正点（今回）:
+#   - 週バケツを「日曜始まり（日〜土）」の暦週で判定
+#   - 今日が日曜なら、その週は “今週” ではなく “来週” 扱い（週バケツを +1 シフト）
 
 set -euo pipefail
 
@@ -463,6 +467,14 @@ fi
         m = M + 12*a - 3
         return D + int((153*m + 2)/5) + 365*y + int(y/4) - int(y/100) + int(y/400) - 32045
       }
+
+      # ---- 追加：週（日曜始まり）の開始日(JDN)を返す ----
+      function week_start(j,    dow) {
+        # dow: Sunday=0 .. Saturday=6
+        dow = (j + 1) % 7
+        return j - dow
+      }
+
       function pri_icon(p) {
         if (p <= 1)      return "🔴"
         else if (p == 2) return "🟠"
@@ -502,6 +514,15 @@ fi
       BEGIN {
         todayJ = ymd_to_jdn(today)
 
+        # 今日の曜日（Sunday=0）
+        todayDow = (todayJ + 1) % 7
+
+        # 今日が日曜なら、週バケツを1つ先送り（今週→来週）
+        sundayShift = (todayDow == 0 ? 1 : 0)
+
+        # 「今日が属する週」の開始（日曜）
+        todayWeekStart = week_start(todayJ)
+
         oN = todayN = tomN = 0
         for (i = 0; i <= 8; i++) wN[i] = 0
         laterN = 0
@@ -538,20 +559,26 @@ fi
         dJ = ymd_to_jdn(substr(due,1,10))
         diff = dJ - todayJ
 
-        if (dJ == 0)         bucket = "later"
-        else if (diff < 0)   bucket = "over"
-        else if (diff == 0)  bucket = "today"
-        else if (diff == 1)  bucket = "tomorrow"
-        else if (diff <= 6)  bucket = "w0"
-        else if (diff <= 13) bucket = "w1"
-        else if (diff <= 20) bucket = "w2"
-        else if (diff <= 27) bucket = "w3"
-        else if (diff <= 34) bucket = "w4"
-        else if (diff <= 41) bucket = "w5"
-        else if (diff <= 48) bucket = "w6"
-        else if (diff <= 55) bucket = "w7"
-        else if (diff <= 60) bucket = "w8"
-        else                 bucket = "later"
+        if (dJ == 0) {
+          bucket = "later"
+        } else if (diff < 0) {
+          bucket = "over"
+        } else if (diff == 0) {
+          bucket = "today"
+        } else if (diff == 1) {
+          bucket = "tomorrow"
+        } else {
+          # ---- 主変更：日曜始まりの「暦週」で判定 ----
+          ws = week_start(dJ)
+          weekDiff = int((ws - todayWeekStart) / 7)   # 0=今週,1=来週,...
+
+          idx = weekDiff + sundayShift                # 今日が日曜なら +1
+          if (idx < 0) idx = 0
+
+          # 2ヶ月(60日)より先 or 8週より先は "later" 扱い（元仕様踏襲）
+          if (diff > 60 || idx > 8) bucket = "later"
+          else bucket = "w" idx
+        }
 
         if (bucket=="over") {
           oN++
