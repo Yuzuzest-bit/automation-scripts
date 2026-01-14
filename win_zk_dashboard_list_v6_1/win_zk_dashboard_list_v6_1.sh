@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
-# win_zk_dashboard_list_v6_1.sh
-# Windows(Git Bash/MSYS2)向け: 1回のawkで全ファイル処理して高速化
-# Fix v6.1: statの区切りタブ問題を回避（pathが空になってgawkが落ちる件）
-
+# win_zk_dashboard_mtime_with_status_v1.sh
+# - gawk不要（strftime不使用）
+# - mtime(更新日時)でソートして一覧を生成
+# - closed/decision/priority/comment/arrow の仕様は update_in_place.sh(scan_meta) に準拠
+#
+# usage:
+#   ./win_zk_dashboard_mtime_with_status_v1.sh [ROOT]
+#
+# env:
+#   SCAN_MAX_LINES=80         # 本文スキャン行数（@focus等検出用。不要なら0）
+#   SORT_ORDER=desc|asc       # デフォルト desc（新しい→古い）
+#
 set -Eeuo pipefail
 
 # --- ロケール（sort速度&文字化け対策） ---
@@ -15,31 +23,31 @@ else
 fi
 export LANG="${LC_ALL}"
 
+trap 'rc=$?; printf "[ERR] exit=%d line=%d cmd=%s\n" "$rc" "$LINENO" "$BASH_COMMAND" >&2' ERR
+
 # --- 設定 ---
 OUTDIR_NAME="dashboards"
-OUTPUT_FILENAME="DASHBOARD_LIST.md"
+OUTPUT_FILENAME="DASHBOARD_MTIME_STATUS.md"
 SCAN_MAX_LINES="${SCAN_MAX_LINES:-80}"
+SORT_ORDER="${SORT_ORDER:-desc}"   # ★デフォルト: desc（新しい→古い）
 
-# --- アイコン ---
+# --- Icons（update_in_place準拠）---
 ICON_CLOSED="✅ "
 ICON_OPEN="📖 "
 ICON_ERROR="⚠️ "
 
-ICON_SEED="🌱 "
-ICON_RES="📚 "
-ICON_LOG="✍️ "
-ICON_MINUTES="🕒 "
+ICON_FOCUS="🎯"
+ICON_AWAIT="⏳"
+ICON_BLOCK="🧱"
 
-ICON_DECISION="🗳️ "
+ICON_MINUTES_NOTE="🕒 "
+ICON_DECISION_NOTE="🗳️ "
+
 ICON_ACCEPT="🆗 "
 ICON_REJECT="❌ "
 ICON_SUPER="♻️ "
 ICON_DROP="💤 "
 ICON_PROPOSE="📝 "
-
-ICON_FOCUS="🎯 "
-ICON_AWAIT="⏳ "
-ICON_BLOCK="🧱 "
 
 # --- ルート ---
 ROOT="${1:-$PWD}"
@@ -49,18 +57,15 @@ OUTDIR="${ROOT}/${OUTDIR_NAME}"
 mkdir -p "$OUTDIR"
 OUTPUT_FILE="${OUTDIR}/${OUTPUT_FILENAME}"
 
-echo "Scanning workspace (Windows fast): $ROOT"
+echo "Scanning workspace (mtime + update_in_place meta): $ROOT"
 
-# --- awk選択（gawk推奨） ---
 AWK_BIN="awk"
-if command -v gawk >/dev/null 2>&1; then
-  AWK_BIN="gawk"
-fi
-
 TMP_LIST="$(mktemp)"
 
-# 重要: statのフォーマットに “本物のタブ” を渡す（\t解釈しない環境がある）
-STAT_FMT=$'%Y\t%n'
+# --- stat フォーマット（Windows/MSYS2/Git Bash想定: GNU stat） ---
+# 本物タブを渡す。epoch<TAB>human<TAB>path
+# human は "%y"（例: 2026-01-14 10:22:33.123456789 +0900）
+STAT_FMT=$'%Y\t%y\t%n'
 
 find "$ROOT" \
   \( -path "*/.*" -o -path "*/${OUTDIR_NAME}" \) -prune -o \
@@ -70,153 +75,205 @@ find "$ROOT" \
   -v output_file="$OUTPUT_FILE" \
   -v scan_max_lines="$SCAN_MAX_LINES" \
   -v ic="$ICON_CLOSED" -v io="$ICON_OPEN" -v ierr="$ICON_ERROR" \
-  -v iseed="$ICON_SEED" -v ires="$ICON_RES" -v ilog="$ICON_LOG" -v imin="$ICON_MINUTES" \
-  -v idec="$ICON_DECISION" -v iacc="$ICON_ACCEPT" -v irej="$ICON_REJECT" -v isup="$ICON_SUPER" -v idrp="$ICON_DROP" -v iprp="$ICON_PROPOSE" \
+  -v imin="$ICON_MINUTES_NOTE" \
+  -v idec="$ICON_DECISION_NOTE" \
+  -v iacc="$ICON_ACCEPT" -v irej="$ICON_REJECT" -v isup="$ICON_SUPER" -v idrp="$ICON_DROP" -v iprp="$ICON_PROPOSE" \
   -v ifoc="$ICON_FOCUS" -v ia="$ICON_AWAIT" -v ib="$ICON_BLOCK" \
   '
-  BEGIN { IGNORECASE = 1 }
-
-  function trim(s){ sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-  function strip_quotes(s){ gsub(/^["\047]+|["\047]+$/, "", s); return s }
-
-  function to_sort_key(ts,   t){
-    t = ts
-    gsub(/[-:T ]/, "", t)
-    t = substr(t, 1, 14)
-    while(length(t) < 14) t = t "0"
-    return t
+  function trim(s){
+    sub(/^\xef\xbb\xbf/, "", s)     # BOM
+    sub(/\r$/, "", s)              # CRLF
+    gsub(/^[ \t]+|[ \t]+$/, "", s)
+    return s
   }
-
-  function basename_no_ext(path,   p){
+  function strip_quotes(v){
+    v = trim(v)
+    gsub(/^"+|"+$/, "", v)
+    gsub(/^\047+|\047+$/, "", v)
+    return v
+  }
+  function tolower_ascii(s, out, i, c){
+    out=""
+    for(i=1;i<=length(s);i++){
+      c=substr(s,i,1)
+      if(c>="A" && c<="Z") c=tolower(c)
+      out=out c
+    }
+    return out
+  }
+  function basename_no_ext(path, p){
     p = path
     sub(/^.*[\/\\]/, "", p)
     sub(/\.md$/, "", p)
     return p
   }
-
-  function apply_tags(s,   x){
-    x = s
-    if (x ~ /zk-seed/) is_seed = 1
-    if (x ~ /type-log/) is_log = 1
-    if (x ~ /type-resource/) is_res = 1
+  function apply_tags(s, x){
+    x = tolower_ascii(s)
+    # update_in_place側は minutes を強めに拾うので同じ思想で
     if (x ~ /minutes/) is_minutes = 1
   }
+  function trim_human_date(h, d){
+    # "YYYY-MM-DD HH:MM:SS...." -> "YYYY-MM-DD HH:MM"
+    d = h
+    if (length(d) > 16) d = substr(d, 1, 16)
+    return d
+  }
 
-  function scan_one_file(path, mtime,   line, n, in_fm, tags_mode, body_count, v){
-    closed_date = ""
-    decision = ""
-    summary = ""
+  # --- update_in_place scan_meta準拠 ---
+  function scan_meta(path,   line, t, in_fm, first, tags_mode, low, v, body_count){
+    closed=0; decision=""; sup_by=""; summary=""; is_minutes=0;
+    prio_set=0; prio_icon=""; prio_text="";
 
-    is_seed = is_log = is_res = is_minutes = 0
-    marker = ""
-
-    in_fm = 0
-    tags_mode = 0
-    body_count = 0
-    n = 0
+    in_fm=0; first=0; tags_mode=0; body_count=0;
 
     while ((getline line < path) > 0) {
-      n++
-      sub(/\r$/, "", line)                 # CRLF対策
-      if (n == 1) sub(/^\xef\xbb\xbf/, "", line)  # BOM対策
+      sub(/\r$/, "", line)
+      t = trim(line)
 
-      if (n == 1 && line ~ /^---[ \t]*$/) { in_fm = 1; continue }
+      # 先頭の空行は飛ばす（update_in_place準拠）
+      if(!first){
+        if(t=="") continue
+        first=1
+        if(t ~ /^---[ \t]*$/){ in_fm=1; continue }
+      }
 
-      if (in_fm) {
-        if (line ~ /^(---|\.\.\.)[ \t]*$/) { in_fm = 0; continue }
+      if(in_fm){
+        if(t ~ /^(---|\.\.\.)[ \t]*$/){ in_fm=0; continue }
 
-        if (line ~ /^closed:[ \t]*/) {
-          v = line; sub(/^closed:[ \t]*/, "", v)
-          closed_date = trim(v)
-          continue
-        }
-        if (line ~ /^decision:[ \t]*/) {
-          v = line; sub(/^decision:[ \t]*/, "", v)
-          decision = tolower(trim(v))
-          continue
-        }
-        if (line ~ /^summary:[ \t]*/) {
-          v = line; sub(/^summary:[ \t]*/, "", v)
-          summary = strip_quotes(trim(v))
+        if(t ~ /^closed:[ \t]*/){ closed=1; continue }
+
+        if(t ~ /^decision:[ \t]*/){
+          v=t; sub(/^decision:[ \t]*/, "", v)
+          decision=tolower_ascii(trim(v))
           continue
         }
 
-        if (line ~ /^tags:[ \t]*/) {
-          v = line; sub(/^tags:[ \t]*/, "", v)
-          v = trim(v)
+        if(t ~ /^superseded_by:[ \t]*/){
+          v=t; sub(/^superseded_by:[ \t]*/, "", v)
+          sup_by=strip_quotes(v)
+          continue
+        }
+
+        if(t ~ /^summary:[ \t]*/){
+          v=t; sub(/^summary:[ \t]*/, "", v)
+          summary=strip_quotes(v)
+          continue
+        }
+
+        if(t ~ /^tags:[ \t]*/){
+          v=t; sub(/^tags:[ \t]*/, "", v)
+          v=trim(v)
           apply_tags(v)
-          if (v == "" || v ~ /^$/) tags_mode = 1
+          if(v=="") tags_mode=1
           continue
         }
-        if (tags_mode) {
-          if (line ~ /^[ \t]*-[ \t]*/) {
-            v = line; sub(/^[ \t]*-[ \t]*/, "", v)
-            v = trim(v)
+
+        if(tags_mode){
+          if(t ~ /^[ \t]*-[ \t]*/){
+            v=t; sub(/^[ \t]*-[ \t]*/, "", v)
+            v=trim(v)
             apply_tags(v)
             continue
           }
-          if (line ~ /^[A-Za-z0-9_-]+:[ \t]*/) tags_mode = 0
+          if(t ~ /^[A-Za-z0-9_-]+:[ \t]*/) tags_mode=0
         }
+
+        # frontmatter中で minutes を拾う（update_in_place寄せ）
+        if (tolower_ascii(t) ~ /minutes/) is_minutes=1
         continue
       }
 
-      if (marker == "" && line ~ /@focus/)    marker = ifoc
-      if (marker == "" && line ~ /@awaiting/) marker = ia
-      if (marker == "" && line ~ /@blocked/)  marker = ib
+      # 本文スキャン（prio検出）
+      if(scan_max_lines > 0 && prio_set==0){
+        low = tolower_ascii(line)
+        if(index(low,"@awaiting")){
+          prio_icon=ia
+          sub(/.*@awaiting[[:space:]]*/, "", line)
+          prio_text=trim(line)
+          prio_set=1
+        } else if(index(low,"@blocked")){
+          prio_icon=ib
+          sub(/.*@blocked[[:space:]]*/, "", line)
+          prio_text=trim(line)
+          prio_set=1
+        } else if(index(low,"@focus")){
+          prio_icon=ifoc
+          sub(/.*@focus[[:space:]]*/, "", line)
+          prio_text=trim(line)
+          prio_set=1
+        }
+      }
 
       body_count++
-      if (body_count >= scan_max_lines) break
-      if (marker != "" && body_count >= 3) break
+      if(scan_max_lines > 0 && body_count >= scan_max_lines) break
+      if(scan_max_lines > 0 && prio_set==1 && body_count >= 3) break
     }
     close(path)
 
-    status_icon = (closed_date != "" ? ic : io)
+    # タブはTSV壊すので潰す（update_in_place思想）
+    gsub(/\t/, " ", prio_text)
+    gsub(/\t/, " ", sup_by)
+  }
 
-    type_icon = ""
-    if (is_seed)    type_icon = type_icon iseed
-    if (is_log)     type_icon = type_icon ilog
-    if (is_res)     type_icon = type_icon ires
-    if (is_minutes) type_icon = type_icon imin
-
-    dec_icon = ""
-    if (decision != "") {
-      if (decision == "accepted")        dec_icon = iacc
-      else if (decision == "rejected")   dec_icon = irej
-      else if (decision == "superseded") dec_icon = isup
-      else if (decision == "dropped")    dec_icon = idrp
-      else                               dec_icon = iprp
-    }
-
-    display_summary = (summary != "" ? "  _(" summary ")_" : "")
-
-    if (closed_date != "") {
-      sort_key = to_sort_key(closed_date)
-      clean_date = substr(closed_date, 1, 10)
-      date_disp = " `closed : " clean_date "`"
-    } else {
-      sort_key = mtime
-      date_disp = " `updated : " strftime("%Y-%m-%d", mtime) "`"
-    }
-
-    printf "%s\t- [[%s]] %s%s%s%s%s%s\n", sort_key, fname, status_icon, type_icon, dec_icon, marker, display_summary, date_disp
+  function decision_state_icon(dec){
+    if(dec=="") return ""
+    if(dec=="accepted") return iacc
+    if(dec=="rejected") return irej
+    if(dec=="superseded") return isup
+    if(dec=="dropped") return idrp
+    return iprp
   }
 
   {
-    line = $0
-    sub(/\r$/, "", line)
+    # 入力: epoch<TAB>human<TAB>path（FSに依存せず分割）
+    raw=$0
+    sub(/\r$/, "", raw)
 
-    # 1個目のタブで分割（FSに依存しない）
-    t = index(line, "\t")
-    if (t == 0) next
+    t1=index(raw,"\t"); if(t1==0) next
+    rest=substr(raw,t1+1)
+    t2=index(rest,"\t"); if(t2==0) next
 
-    mtime = substr(line, 1, t-1) + 0
-    path  = substr(line, t+1)
+    mtime = substr(raw,1,t1-1)+0
+    human = substr(rest,1,t2-1)
+    path  = substr(rest,t2+1)
 
-    if (path == "" || mtime <= 0) next
-    if (path == output_file) next
+    if(path=="" || mtime<=0) next
+    if(path==output_file) next
+
+    scan_meta(path)
 
     fname = basename_no_ext(path)
-    scan_one_file(path, mtime)
+
+    life_icon = (closed ? ic : io)
+    minutes_icon = (is_minutes ? imin : "")
+    kind_icon = (decision!="" ? idec : "")
+    dec_icon  = decision_state_icon(decision)
+
+    # prio: decisionが確定系なら抑止（update_in_place準拠）
+    prio_part=""
+    if(!(decision ~ /^(accepted|rejected|superseded|dropped)$/) && prio_set==1){
+      if(prio_text!="") prio_part = prio_icon "(" prio_text ")"
+      else prio_part = prio_icon
+    }
+
+    arrow_part=""
+    if(decision=="superseded" && sup_by!=""){
+      arrow_part=" (→ " sup_by ")"
+    }
+
+    summary_part = (summary!="" ? "  _(" summary ")_" : "")
+
+    date_disp = " `updated : " trim_human_date(human) "`"
+
+    # 出力: sortkey(mtime) + 本文
+    printf "%d\t- %s%s%s%s[[%s]]%s%s%s%s\n",
+      mtime,
+      life_icon, minutes_icon, kind_icon, dec_icon,
+      fname,
+      prio_part,
+      arrow_part,
+      summary_part,
+      date_disp
   }
 ' > "$TMP_LIST"
 
@@ -224,15 +281,19 @@ find "$ROOT" \
   echo "---"
   echo "id: $(date '+%Y%m%d%H%M')-DASHBOARD"
   echo "tags: [system, dashboard]"
-  echo "title: All Notes (Timeline)"
+  echo "title: All Notes (mtime order)"
   echo "updated: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "---"
   echo ""
-  echo "# 📅 Timeline Dashboard"
-  echo "> **Order:** Recently Closed > Recently Modified"
+  echo "# 📅 Timeline Dashboard (mtime)"
+  echo "> **Order:** mtime (${SORT_ORDER}) / **Meta:** closed + decision + prio (update_in_place compatible)"
   echo ""
 
-  LC_ALL=C sort -rn "$TMP_LIST" | cut -f2-
+  if [[ "$SORT_ORDER" == "asc" ]]; then
+    LC_ALL=C sort -n "$TMP_LIST" | cut -f2-
+  else
+    LC_ALL=C sort -rn "$TMP_LIST" | cut -f2-
+  fi
 } > "$OUTPUT_FILE"
 
 rm -f "$TMP_LIST"
