@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# win_zk_dashboard_updated_asc_v1.sh
-# Windows(Git Bash/MSYS2)向け: mdファイルを更新日時(mtime)で昇順に並べてダッシュボード生成
+# win_zk_dashboard_updated_asc_nogawk_v1.sh
+# gawk不要（strftime不要）版:
+# - mdファイルを更新日時(mtime)で昇順に並べてダッシュボード生成
 # - closed は見ない
-# - 1回のawkで全ファイル処理（高速寄り）
-# - statの区切りタブ問題を回避（本物のタブを渡す）
+# - 日付表示は stat の %y を使う（awkでstrftimeしない）
 #
 # usage:
-#   ./win_zk_dashboard_updated_asc_v1.sh [ROOT]
+#   ./win_zk_dashboard_updated_asc_nogawk_v1.sh [ROOT]
 #
 # env:
-#   SCAN_MAX_LINES=80         # 本文スキャン行数（@focus等の検出用。不要なら0）
+#   SCAN_MAX_LINES=40         # 本文スキャン行数（@focus等検出用。不要なら0）
 #   SORT_ORDER=asc|desc       # デフォルト asc（古い→新しい）
 #
 set -Eeuo pipefail
@@ -50,24 +50,16 @@ OUTDIR="${ROOT}/${OUTDIR_NAME}"
 mkdir -p "$OUTDIR"
 OUTPUT_FILE="${OUTDIR}/${OUTPUT_FILENAME}"
 
-echo "Scanning workspace (mtime sort): $ROOT"
+echo "Scanning workspace (mtime sort, no gawk): $ROOT"
 
-# --- awk選択（gawk推奨: strftime 使用） ---
 AWK_BIN="awk"
-if command -v gawk >/dev/null 2>&1; then
-  AWK_BIN="gawk"
-fi
-
-# gawkが無いと strftime が無いawkがあり得るので、保守的に弾く
-if ! "$AWK_BIN" 'BEGIN{ exit (typeof(strftime)=="function" ? 0 : 1) }' >/dev/null 2>&1; then
-  echo "[ERR] This script requires gawk (strftime). Please install gawk in MSYS2/Git Bash." >&2
-  exit 2
-fi
 
 TMP_LIST="$(mktemp)"
 
-# 重要: statのフォーマットに “本物のタブ” を渡す（\t解釈しない環境がある）
-STAT_FMT=$'%Y\t%n'
+# 重要: “本物のタブ” を渡す
+# %Y = epoch, %y = 人間が読む更新日時, %n = path
+# 例: 1700000000<TAB>2026-01-14 10:22:33.123456789 +0900<TAB>/path/file.md
+STAT_FMT=$'%Y\t%y\t%n'
 
 find "$ROOT" \
   \( -path "*/.*" -o -path "*/${OUTDIR_NAME}" \) -prune -o \
@@ -80,8 +72,6 @@ find "$ROOT" \
   -v iseed="$ICON_SEED" -v ires="$ICON_RES" -v ilog="$ICON_LOG" -v imin="$ICON_MINUTES" \
   -v ifoc="$ICON_FOCUS" -v ia="$ICON_AWAIT" -v ib="$ICON_BLOCK" \
   '
-  BEGIN { IGNORECASE = 1 }
-
   function trim(s){ sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
   function strip_quotes(s){ gsub(/^["\047]+|["\047]+$/, "", s); return s }
 
@@ -93,33 +83,29 @@ find "$ROOT" \
   }
 
   function apply_tags(s,   x){
-    x = s
-    if (x ~ /zk-seed/) is_seed = 1
-    if (x ~ /type-log/) is_log = 1
-    if (x ~ /type-resource/) is_res = 1
-    if (x ~ /minutes/) is_minutes = 1
+    x = tolower(s)
+    if (x ~ /zk-seed/)        is_seed = 1
+    if (x ~ /type-log/)       is_log = 1
+    if (x ~ /type-resource/)  is_res = 1
+    if (x ~ /minutes/)        is_minutes = 1
   }
 
-  function scan_one_file(path, mtime,   line, n, in_fm, tags_mode, body_count, v){
+  function scan_one_file(path,   line, n, in_fm, tags_mode, body_count, v){
     summary = ""
-
-    is_seed = is_log = is_res = is_minutes = 0
     marker = ""
+    is_seed = is_log = is_res = is_minutes = 0
+
+    if (scan_max_lines <= 0) return
 
     in_fm = 0
     tags_mode = 0
     body_count = 0
     n = 0
 
-    # scan_max_lines が 0 ならスキャンしない（最速モード）
-    if (scan_max_lines <= 0) {
-      return
-    }
-
     while ((getline line < path) > 0) {
       n++
-      sub(/\r$/, "", line)                 # CRLF対策
-      if (n == 1) sub(/^\xef\xbb\xbf/, "", line)  # BOM対策
+      sub(/\r$/, "", line)
+      if (n == 1) sub(/^\xef\xbb\xbf/, "", line)
 
       if (n == 1 && line ~ /^---[ \t]*$/) { in_fm = 1; continue }
 
@@ -136,7 +122,7 @@ find "$ROOT" \
           v = line; sub(/^tags:[ \t]*/, "", v)
           v = trim(v)
           apply_tags(v)
-          if (v == "" || v ~ /^$/) tags_mode = 1
+          if (v == "") tags_mode = 1
           continue
         }
         if (tags_mode) {
@@ -162,7 +148,29 @@ find "$ROOT" \
     close(path)
   }
 
-  function emit_line(path, mtime,   fname, type_icon, display_summary, date_disp){
+  {
+    # 期待形式: epoch<TAB>human<TAB>path
+    line = $0
+    sub(/\r$/, "", line)
+
+    t1 = index(line, "\t"); if (t1 == 0) next
+    rest = substr(line, t1+1)
+    t2 = index(rest, "\t"); if (t2 == 0) next
+
+    mtime = substr(line, 1, t1-1) + 0
+    human = substr(rest, 1, t2-1)
+    path  = substr(rest, t2+1)
+
+    if (path == "" || mtime <= 0) next
+    if (path == output_file) next
+
+    # 初期化してスキャン
+    summary = ""
+    marker = ""
+    is_seed = is_log = is_res = is_minutes = 0
+
+    scan_one_file(path)
+
     fname = basename_no_ext(path)
 
     type_icon = ""
@@ -172,33 +180,14 @@ find "$ROOT" \
     if (is_minutes) type_icon = type_icon imin
 
     display_summary = (summary != "" ? "  _(" summary ")_" : "")
-    date_disp = " `updated : " strftime("%Y-%m-%d", mtime) "`"
 
-    # sort_key は mtime の数値
+    # human は "YYYY-MM-DD HH:MM:SS..." なので、見た目は先頭16文字くらいで十分
+    hd = human
+    if (length(hd) > 16) hd = substr(hd, 1, 16)
+
+    date_disp = " `updated : " hd "`"
+
     printf "%d\t- [[%s]] %s%s%s%s%s\n", mtime, fname, io, type_icon, marker, display_summary, date_disp
-  }
-
-  {
-    line = $0
-    sub(/\r$/, "", line)
-
-    # 1個目のタブで分割（FSに依存しない）
-    t = index(line, "\t")
-    if (t == 0) next
-
-    mtime = substr(line, 1, t-1) + 0
-    path  = substr(line, t+1)
-
-    if (path == "" || mtime <= 0) next
-    if (path == output_file) next
-
-    # 初期化してスキャン（scan_max_lines=0ならscan_one_file内で即return）
-    summary = ""
-    marker = ""
-    is_seed = is_log = is_res = is_minutes = 0
-
-    scan_one_file(path, mtime)
-    emit_line(path, mtime)
   }
 ' > "$TMP_LIST"
 
@@ -211,7 +200,7 @@ find "$ROOT" \
   echo "---"
   echo ""
   echo "# 🗂️ Updated Order Dashboard"
-  echo "> **Order:** mtime (${SORT_ORDER})  /  **Tip:** SCAN_MAX_LINES=0 で最速"
+  echo "> **Order:** mtime (${SORT_ORDER}) / **Tip:** SCAN_MAX_LINES=0 で最速"
   echo ""
 
   if [[ "$SORT_ORDER" == "desc" ]]; then
