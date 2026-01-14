@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# win_zk_dashboard_updated_asc_nogawk_v1.sh
-# gawk不要（strftime不要）版:
-# - mdファイルを更新日時(mtime)で昇順に並べてダッシュボード生成
-# - closed は見ない
-# - 日付表示は stat の %y を使う（awkでstrftimeしない）
+# win_zk_dashboard_updated_with_status_v1.sh
+# Windows(Git Bash/MSYS2)向け:
+# - .md を全スキャンしてダッシュボード生成
+# - 並び順: 更新日時(mtime)のみ（デフォルト昇順）
+# - 判定: closed / decision / superseded_by / minutes / seed/log/resource / @focus/@awaiting/@blocked / summary
+# - gawk不要（strftime不使用）: 日付表示は stat の %y を使う
 #
 # usage:
-#   ./win_zk_dashboard_updated_asc_nogawk_v1.sh [ROOT]
+#   ./win_zk_dashboard_updated_with_status_v1.sh [ROOT]
 #
 # env:
-#   SCAN_MAX_LINES=40         # 本文スキャン行数（@focus等検出用。不要なら0）
+#   SCAN_MAX_LINES=80         # 本文スキャン行数（@focus等検出用。不要なら0）
 #   SORT_ORDER=asc|desc       # デフォルト asc（古い→新しい）
 #
 set -Eeuo pipefail
@@ -28,16 +29,27 @@ trap 'rc=$?; printf "[ERR] exit=%d line=%d cmd=%s\n" "$rc" "$LINENO" "$BASH_COMM
 
 # --- 設定 ---
 OUTDIR_NAME="dashboards"
-OUTPUT_FILENAME="DASHBOARD_UPDATED_ASC.md"
-SCAN_MAX_LINES="${SCAN_MAX_LINES:-40}"
+OUTPUT_FILENAME="DASHBOARD_UPDATED_STATUS.md"
+SCAN_MAX_LINES="${SCAN_MAX_LINES:-80}"
 SORT_ORDER="${SORT_ORDER:-asc}"   # asc|desc
 
-# --- アイコン（必要なものだけ） ---
-ICON_OPEN="📄 "
+# --- アイコン（提示スクリプトに合わせる） ---
+ICON_CLOSED="✅ "
+ICON_OPEN="📖 "
+ICON_ERROR="⚠️ "
+
 ICON_SEED="🌱 "
 ICON_RES="📚 "
 ICON_LOG="✍️ "
 ICON_MINUTES="🕒 "
+
+ICON_DECISION="🗳️ "
+ICON_ACCEPT="🆗 "
+ICON_REJECT="❌ "
+ICON_SUPER="♻️ "
+ICON_DROP="💤 "
+ICON_PROPOSE="📝 "
+
 ICON_FOCUS="🎯 "
 ICON_AWAIT="⏳ "
 ICON_BLOCK="🧱 "
@@ -50,15 +62,13 @@ OUTDIR="${ROOT}/${OUTDIR_NAME}"
 mkdir -p "$OUTDIR"
 OUTPUT_FILE="${OUTDIR}/${OUTPUT_FILENAME}"
 
-echo "Scanning workspace (mtime sort, no gawk): $ROOT"
+echo "Scanning workspace (mtime sort + closed/decision): $ROOT"
 
 AWK_BIN="awk"
-
 TMP_LIST="$(mktemp)"
 
 # 重要: “本物のタブ” を渡す
-# %Y = epoch, %y = 人間が読む更新日時, %n = path
-# 例: 1700000000<TAB>2026-01-14 10:22:33.123456789 +0900<TAB>/path/file.md
+# %Y = epoch(mtime), %y = 人間が読める更新日時, %n = path
 STAT_FMT=$'%Y\t%y\t%n'
 
 find "$ROOT" \
@@ -68,12 +78,27 @@ find "$ROOT" \
 | "$AWK_BIN" \
   -v output_file="$OUTPUT_FILE" \
   -v scan_max_lines="$SCAN_MAX_LINES" \
-  -v io="$ICON_OPEN" \
+  -v ic="$ICON_CLOSED" -v io="$ICON_OPEN" -v ierr="$ICON_ERROR" \
   -v iseed="$ICON_SEED" -v ires="$ICON_RES" -v ilog="$ICON_LOG" -v imin="$ICON_MINUTES" \
+  -v idec="$ICON_DECISION" \
+  -v iacc="$ICON_ACCEPT" -v irej="$ICON_REJECT" -v isup="$ICON_SUPER" -v idrp="$ICON_DROP" -v iprp="$ICON_PROPOSE" \
   -v ifoc="$ICON_FOCUS" -v ia="$ICON_AWAIT" -v ib="$ICON_BLOCK" \
   '
-  function trim(s){ sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-  function strip_quotes(s){ gsub(/^["\047]+|["\047]+$/, "", s); return s }
+  BEGIN { IGNORECASE = 1 }
+
+  function trim(s){ sub(/^\xef\xbb\xbf/, "", s); sub(/\r$/, "", s); gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+  function strip_quotes(v){ v=trim(v); gsub(/^"+|"+$/, "", v); gsub(/^\047+|\047+$/, "", v); return v }
+
+  # POSIX awkでも動くASCII限定tolower（必要なら）
+  function tolower_ascii(s, out, i, c){
+    out=""
+    for(i=1;i<=length(s);i++){
+      c=substr(s,i,1)
+      if(c>="A" && c<="Z") c=tolower(c)
+      out=out c
+    }
+    return out
+  }
 
   function basename_no_ext(path,   p){
     p = path
@@ -83,73 +108,138 @@ find "$ROOT" \
   }
 
   function apply_tags(s,   x){
-    x = tolower(s)
-    if (x ~ /zk-seed/)        is_seed = 1
-    if (x ~ /type-log/)       is_log = 1
-    if (x ~ /type-resource/)  is_res = 1
-    if (x ~ /minutes/)        is_minutes = 1
+    x = tolower_ascii(s)
+    if (x ~ /zk-seed/)       is_seed = 1
+    if (x ~ /type-log/)      is_log = 1
+    if (x ~ /type-resource/) is_res = 1
+    if (x ~ /minutes/)       is_minutes = 1
   }
 
-  function scan_one_file(path,   line, n, in_fm, tags_mode, body_count, v){
+  function scan_one_file(path,   line, t, in_fm, tags_mode, body_count, v, low){
+    # 初期化
+    closed = 0
+    decision = ""
+    sup_by = ""
     summary = ""
-    marker = ""
+
     is_seed = is_log = is_res = is_minutes = 0
 
-    if (scan_max_lines <= 0) return
+    marker = ""
+    marker_text = ""
 
     in_fm = 0
     tags_mode = 0
     body_count = 0
-    n = 0
 
     while ((getline line < path) > 0) {
-      n++
       sub(/\r$/, "", line)
-      if (n == 1) sub(/^\xef\xbb\xbf/, "", line)
 
-      if (n == 1 && line ~ /^---[ \t]*$/) { in_fm = 1; continue }
+      if (NR == 1) {
+        # （注）NRは入力ストリーム全体なので使わない。BOMは個別に処理する
+      }
+
+      # BOM対策：ファイル先頭行だけ除去したいので、tの先頭にBOMが残ってもtrimで消える
+      t = trim(line)
+
+      # frontmatter 開始
+      if (!seen_first) {
+        if (t == "") continue
+        seen_first = 1
+        if (t ~ /^---[ \t]*$/) { in_fm = 1; next }
+      }
 
       if (in_fm) {
-        if (line ~ /^(---|\.\.\.)[ \t]*$/) { in_fm = 0; continue }
+        if (t ~ /^(---|\.\.\.)[ \t]*$/) { in_fm = 0; next }
 
-        if (line ~ /^summary:[ \t]*/) {
-          v = line; sub(/^summary:[ \t]*/, "", v)
-          summary = strip_quotes(trim(v))
-          continue
+        if (t ~ /^closed:[ \t]*/) { closed = 1; next }
+
+        if (t ~ /^decision:[ \t]*/) {
+          v = t
+          sub(/^decision:[ \t]*/, "", v)
+          decision = tolower_ascii(trim(v))
+          next
         }
 
-        if (line ~ /^tags:[ \t]*/) {
-          v = line; sub(/^tags:[ \t]*/, "", v)
+        if (t ~ /^superseded_by:[ \t]*/) {
+          v = t
+          sub(/^superseded_by:[ \t]*/, "", v)
+          sup_by = strip_quotes(v)
+          next
+        }
+
+        if (t ~ /^summary:[ \t]*/) {
+          v = t
+          sub(/^summary:[ \t]*/, "", v)
+          summary = strip_quotes(v)
+          next
+        }
+
+        if (t ~ /^tags:[ \t]*/) {
+          v = t
+          sub(/^tags:[ \t]*/, "", v)
           v = trim(v)
           apply_tags(v)
           if (v == "") tags_mode = 1
-          continue
+          next
         }
+
         if (tags_mode) {
-          if (line ~ /^[ \t]*-[ \t]*/) {
-            v = line; sub(/^[ \t]*-[ \t]*/, "", v)
+          if (t ~ /^[ \t]*-[ \t]*/) {
+            v = t
+            sub(/^[ \t]*-[ \t]*/, "", v)
             v = trim(v)
             apply_tags(v)
-            continue
+            next
           }
-          if (line ~ /^[A-Za-z0-9_-]+:[ \t]*/) tags_mode = 0
+          if (t ~ /^[A-Za-z0-9_-]+:[ \t]*/) tags_mode = 0
         }
-        continue
+
+        # frontmatter中に minutes が直接書かれていても拾えるように（update_in_place寄せ）
+        if (tolower_ascii(t) ~ /minutes/) is_minutes = 1
+
+        next
       }
 
-      if (marker == "" && line ~ /@focus/)    marker = ifoc
-      if (marker == "" && line ~ /@awaiting/) marker = ia
-      if (marker == "" && line ~ /@blocked/)  marker = ib
+      # ここから本文（必要ならスキャン）
+      if (scan_max_lines <= 0) continue
+
+      if (marker == "") {
+        low = tolower_ascii(line)
+        if (index(low, "@awaiting")) { marker = ia; marker_text = trim(substr(line, index(low,"@awaiting")+9)); }
+        else if (index(low, "@blocked")) { marker = ib; marker_text = trim(substr(line, index(low,"@blocked")+8)); }
+        else if (index(low, "@focus")) { marker = ifoc; marker_text = trim(substr(line, index(low,"@focus")+6)); }
+        # タブは壊れるので潰す
+        gsub(/\t/, " ", marker_text)
+      }
 
       body_count++
       if (body_count >= scan_max_lines) break
       if (marker != "" && body_count >= 3) break
     }
     close(path)
+    seen_first = 0
+  }
+
+  function build_dec_icon(dec,   out){
+    out = ""
+    if (dec == "") return out
+    if (dec == "accepted") out = iacc
+    else if (dec == "rejected") out = irej
+    else if (dec == "superseded") out = isup
+    else if (dec == "dropped") out = idrp
+    else out = iprp
+    return out
+  }
+
+  function trim_human_date(h,   d){
+    # 例: "2026-01-14 10:22:33.123456789 +0900" -> "2026-01-14 10:22"
+    d = h
+    if (length(d) > 16) d = substr(d, 1, 16)
+    return d
   }
 
   {
-    # 期待形式: epoch<TAB>human<TAB>path
+    # 入力: epoch<TAB>human<TAB>path  （FSに依存しないで分割）
     line = $0
     sub(/\r$/, "", line)
 
@@ -164,14 +254,12 @@ find "$ROOT" \
     if (path == "" || mtime <= 0) next
     if (path == output_file) next
 
-    # 初期化してスキャン
-    summary = ""
-    marker = ""
-    is_seed = is_log = is_res = is_minutes = 0
-
+    # meta scan
     scan_one_file(path)
 
     fname = basename_no_ext(path)
+
+    status_icon = (closed ? ic : io)
 
     type_icon = ""
     if (is_seed)    type_icon = type_icon iseed
@@ -179,28 +267,49 @@ find "$ROOT" \
     if (is_res)     type_icon = type_icon ires
     if (is_minutes) type_icon = type_icon imin
 
-    display_summary = (summary != "" ? "  _(" summary ")_" : "")
+    decision_note = (decision != "" ? idec : "")
+    dec_icon = build_dec_icon(decision)
 
-    # human は "YYYY-MM-DD HH:MM:SS..." なので、見た目は先頭16文字くらいで十分
-    hd = human
-    if (length(hd) > 16) hd = substr(hd, 1, 16)
+    # decisionが確定系の場合は、優先マーカーを消す（update_in_placeの思想）
+    prio_part = ""
+    if (!(decision ~ /^(accepted|rejected|superseded|dropped)$/) && marker != "") {
+      if (marker_text != "") prio_part = marker "(" marker_text ")"
+      else prio_part = marker
+    }
 
-    date_disp = " `updated : " hd "`"
+    arrow_part = ""
+    if (decision == "superseded" && sup_by != "") {
+      gsub(/\t/, " ", sup_by)
+      arrow_part = " (→ " sup_by ")"
+    }
 
-    printf "%d\t- [[%s]] %s%s%s%s%s\n", mtime, fname, io, type_icon, marker, display_summary, date_disp
+    summary_part = (summary != "" ? "  _(" summary ")_" : "")
+
+    date_disp = " `updated : " trim_human_date(human) "`"
+
+    # sort key: mtime（更新日時のみ）
+    printf "%d\t- [[%s]] %s%s%s%s[[%s]]%s%s%s\n",
+      mtime,
+      fname,
+      status_icon, type_icon, decision_note, dec_icon,
+      fname,
+      prio_part,
+      arrow_part,
+      summary_part,
+      date_disp
   }
 ' > "$TMP_LIST"
 
 {
   echo "---"
-  echo "id: $(date '+%Y%m%d%H%M')-DASHBOARD_UPDATED"
+  echo "id: $(date '+%Y%m%d%H%M')-DASHBOARD"
   echo "tags: [system, dashboard]"
   echo "title: All Notes (Updated mtime order)"
   echo "updated: $(date '+%Y-%m-%d %H:%M:%S')"
   echo "---"
   echo ""
-  echo "# 🗂️ Updated Order Dashboard"
-  echo "> **Order:** mtime (${SORT_ORDER}) / **Tip:** SCAN_MAX_LINES=0 で最速"
+  echo "# 📅 Timeline Dashboard (mtime)"
+  echo "> **Order:** updated(mtime) only / **Status:** closed + decision reflected"
   echo ""
 
   if [[ "$SORT_ORDER" == "desc" ]]; then
