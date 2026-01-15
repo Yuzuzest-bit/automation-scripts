@@ -196,27 +196,21 @@ strip_icon_head() {
   fi
 }
 
-# ★【新機能】行頭の構造（インデント＋リスト記号）だけを抽出し、それ以外を捨てる
+# ★行頭の構造（インデント＋リスト記号）だけを抽出し、それ以外を捨てる
 extract_list_structure() {
   local s="$1"
-  # パターン: 空白 + (- or * or +) + 空白
   if [[ "$s" =~ ^([[:space:]]*[-*+][[:space:]]+) ]]; then
     printf '%s' "${BASH_REMATCH[1]}"
     return
   fi
-  # パターン: 空白 + 数字. + 空白
   if [[ "$s" =~ ^([[:space:]]*[0-9]+\.[[:space:]]+) ]]; then
     printf '%s' "${BASH_REMATCH[1]}"
     return
   fi
-  # パターン: ただのインデントのみ（リスト記号なし）
   if [[ "$s" =~ ^([[:space:]]*) ]]; then
     printf '%s' "${BASH_REMATCH[1]}"
     return
   fi
-  
-  # 全く構造がない場合（行頭から文字など）は、リクエスト通り「全部消す」なら空を返す
-  # しかし安全のため、インデントがない場合は空文字を返す＝左側全消去
   printf ''
 }
 
@@ -250,7 +244,7 @@ consume_auto_suffix() {
   local orig="$1"
   local s="$orig"
   local had_ws=0 removed=0 progressed=0
-  
+
   case "$s" in
     " "*|$'\t'*|"$FWSP"*) had_ws=1;;
   esac
@@ -290,6 +284,21 @@ consume_auto_suffix() {
     printf ' %s' "$s"
   else
     printf '%s' "$s"
+  fi
+}
+
+# ★【追加】prio を必ず「左側」に出すための整形（末尾スペース込み）
+format_prio_prefix() {
+  local icon="${1:-}"
+  local text="${2:-}"
+  if [[ -z "$icon" ]]; then
+    printf '%s' ""
+    return 0
+  fi
+  if [[ -n "$text" ]]; then
+    printf '%s(%s) ' "$icon" "$text"
+  else
+    printf '%s ' "$icon"
   fi
 }
 
@@ -371,7 +380,7 @@ scan_meta() {
   {
     line=$0; sub(/\r$/, "", line); t=trim(line);
     if(NR==1) sub(/^\xef\xbb\xbf/, "", t)
-    
+
     if(!first){
       if(t=="") next
       first=1
@@ -458,7 +467,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     inside="${after_open%%]]*}"
     after_close="${after_open#*]]}"
 
-    # Suffix Cleanup
+    # Suffix Cleanup（右側に残ってる⏳(xxx)等はここで除去）
     after_close="$(consume_auto_suffix "$after_close")"
 
     link_target="$inside"
@@ -471,13 +480,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     target_filepart="${link_target%%#*}"
     target_filepart="$(trim_ws_basic "$target_filepart")"
 
-    # ★ Prefix Cleanup: Aggressive
+    # Prefix Cleanup: Aggressive
     if (( first_link_in_line )); then
-      # 行の最初のリンクなら、インデントと記号だけ残してあとは問答無用で消す
       pre_clean="$(extract_list_structure "$pre")"
       first_link_in_line=0
     else
-      # 2つ目以降のリンクは、単語などを消すと文がおかしくなるので従来のアイコン削除のみ
       pre_clean="$(clean_prefix_segment "$pre")"
     fi
 
@@ -498,21 +505,16 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     IFS=$'\t' read -r life_icon minutes_icon kind_icon dec_icon pr_icon extra_txt arrow_txt <<< "$info_line"
     unset IFS
 
-    prio_part=""
-    if [[ -n "${pr_icon:-}" ]]; then
-      if [[ -n "${extra_txt:-}" ]]; then
-        prio_part="${pr_icon}(${extra_txt})"
-      else
-        prio_part="${pr_icon}"
-      fi
-    fi
+    # ★prio は「リンクの左」に出す（末尾スペース込み）
+    prio_prefix="$(format_prio_prefix "${pr_icon:-}" "${extra_txt:-}")"
 
     arrow_part=""
     if [[ -n "${arrow_txt:-}" ]]; then
       arrow_part=" (→ ${arrow_txt})"
     fi
 
-    out+="${pre_clean}${life_icon:-$ICON_OPEN}${minutes_icon:-}${kind_icon:-}${dec_icon:-}[[${link_target}${link_alias}]]${prio_part}${arrow_part}"
+    # ★順番を変更：... prio_prefix + [[link]] ...
+    out+="${pre_clean}${life_icon:-$ICON_OPEN}${minutes_icon:-}${kind_icon:-}${dec_icon:-}${prio_prefix}[[${link_target}${link_alias}]]${arrow_part}"
     rest="$after_close"
   done
 
